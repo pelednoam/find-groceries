@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -101,6 +102,9 @@ def _run(args: argparse.Namespace) -> int:
     if not todo:
         return 0
 
+    if args.max_cost is not None and not math.isfinite(args.max_cost):
+        print(f"refusing to run: --max-cost must be a finite number, got {args.max_cost}")
+        return 2
     pricing = pricing_for(args.model)
     if args.max_cost is not None and pricing is None:
         print(f"refusing to run: --max-cost is set but no rate card exists for")

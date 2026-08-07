@@ -222,7 +222,19 @@ class TestExtractor:
         ex, slept = self._extractor([RateLimitError() for _ in range(extract.MAX_ATTEMPTS)])
         with pytest.raises(extract.ExtractionError, match="retries exhausted"):
             ex.extract(candidate)
-        assert len(slept) == extract.MAX_ATTEMPTS
+        # One fewer sleep than attempts: sleeping after the final failure
+        # parks a worker for up to 60s and cannot help.
+        assert len(slept) == extract.MAX_ATTEMPTS - 1
+
+    def test_token_budget_leaves_room_for_thinking(self) -> None:
+        # max_tokens caps thinking + response together; observed output is
+        # ~78 tokens, so the headroom is for adaptive thinking.
+        assert extract.MAX_TOKENS >= 8000
+
+    def test_pricing_excludes_models_that_reject_this_request_shape(self) -> None:
+        # build_params always sends output_config.effort and adaptive
+        # thinking; Haiku 4.5 rejects both, so routing to it would 400.
+        assert not any("haiku" in m for m in extract.PRICING)
 
     def test_missing_text_block_is_a_failure_not_an_empty_result(
         self, candidate: Candidate

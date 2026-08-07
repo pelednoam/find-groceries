@@ -40,16 +40,21 @@ from .types import (
 
 DEFAULT_MODEL: Final = "us.anthropic.claude-sonnet-4-6"
 DEFAULT_REGION: Final = "us-east-1"
-MAX_TOKENS: Final = 4000
+# A hard cap on thinking *plus* response text, not just the answer. Measured
+# output is ~78 tokens, but adaptive thinking shares this budget, and a
+# response truncated here surfaces as an unparseable-JSON failure.
+MAX_TOKENS: Final = 8000
 # Retry has exactly one owner: the SDK client is built with max_retries=0
 # (see groceries/client.py), so this loop is the whole policy rather than an
 # outer layer multiplying with the SDK's own.
 MAX_ATTEMPTS: Final = 6
 
+# Only models that accept this request shape belong here: `build_params`
+# always sends `output_config.effort` and adaptive thinking, both of which
+# Haiku 4.5 rejects, so listing it would advertise a route that 400s.
 PRICING: Final[dict[str, Pricing]] = {
     "us.anthropic.claude-sonnet-4-6": Pricing(3.00, 15.00, 0.30, 3.75),
     "us.anthropic.claude-opus-5": Pricing(5.00, 25.00, 0.50, 6.25),
-    "us.anthropic.claude-haiku-4-5-20251001-v1:0": Pricing(1.00, 5.00, 0.10, 1.25),
 }
 # Derived, never hand-listed: the schema enum must stay in lockstep with the
 # stage-1 matchers or the model is structurally unable to name a store that
@@ -297,6 +302,8 @@ class Extractor:
                 last = exc
                 if not is_retryable(exc):
                     raise ExtractionError(f"{type(exc).__name__}: {exc}") from exc
+                if attempt == MAX_ATTEMPTS - 1:
+                    break  # no retry remains; sleeping before giving up is waste
                 self.sleep(backoff_delay(attempt) + self.jitter())
         raise ExtractionError(f"retries exhausted: {last}")
 
