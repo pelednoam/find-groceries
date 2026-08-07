@@ -382,8 +382,11 @@ function mergedBlock(m, label) {
  *  with a paragraph. The two differ by 0.36 stars on average and by 1.15 for
  *  one chain, so the choice is the reader's rather than ours. */
 function googleValue(r) {
-    const key = need("#cross-pop").value;
-    return key === "norm_long" ? r.norm_long : r.norm;
+    switch (need("#cross-pop").value) {
+        case "norm_long": return r.norm_long;
+        case "norm_recent": return r.norm_recent;
+        default: return r.norm;
+    }
 }
 function crossRows() {
     const cc = data().crosscheck;
@@ -415,6 +418,7 @@ function renderCross() {
         `${cc.n_reviews.toLocaleString()} ratings, ${cc.coverage} · `
             + `Google reads ${fmt(mean)} vs the corpus on average`;
     need("#cross-cite").textContent = cc.citation;
+    need("#m-hl").textContent = cc.half_life_years.toFixed(1);
     for (const row of rows) {
         const tr = el("tr", {}, [
             el("td", { text: row.store }),
@@ -425,6 +429,7 @@ function renderCross() {
             })),
             el("td", { class: "num muted", text: row.r.mean.toFixed(2) + "★" }),
             el("td", { class: "num muted", text: row.r.n.toLocaleString() }),
+            el("td", { class: "num muted", text: Math.round(row.r.n_eff).toLocaleString() }),
             el("td", { class: "num muted", text: row.r.median_date }),
         ]);
         tr.addEventListener("click", () => showStore(row.store));
@@ -811,6 +816,7 @@ function fillMethod() {
         ["Items indexed", Object.values(data().items).reduce((a, b) => a + Object.keys(b).length, 0)],
         ["Mapped locations", data().places.length],
         ["Google ratings (cross-check)", (data().crosscheck?.n_reviews ?? 0).toLocaleString()],
+        ["Google half-life", (data().crosscheck?.half_life_years ?? 0) + " years"],
         ["Calibration slope", data().merged?.calibration.slope ?? "n/a"],
         ["Calibration LOO error", data().merged?.calibration.loo_rmse ?? "n/a"],
         ["Shrinkage constant", data().method.shrinkage_k],

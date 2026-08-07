@@ -89,6 +89,11 @@ interface Rating {
   mean: number;
   /** -1..+1, on the same scale as our sentiment */
   norm: number;
+  /** sample size after recency decay — what this evidence is worth now */
+  n_eff: number;
+  /** mean re-weighted toward recent reviews */
+  mean_recent: number;
+  norm_recent: number;
   /** reviews whose author wrote a paragraph — closest to a Reddit comment */
   n_long: number;
   mean_long: number | null;
@@ -107,6 +112,8 @@ interface CrossCheck {
   n_matched_to_map: number;
   coverage: string;
   median_date: string;
+  /** matched to the Reddit headline's own effective half-life */
+  half_life_years: number;
   stores: Record<string, Rating>;
   /** keyed by OSM id, so a map pin can look itself up */
   locations: Record<string, Rating>;

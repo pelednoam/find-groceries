@@ -135,7 +135,12 @@ def google_variance(rating: Mapping[str, Any], cal: Calibration) -> float:
     still leave +-0.25, because what is uncertain is the translation between
     the two scales, not Google's own average.
     """
-    n = max(int(rating["n"]), 1)
+    # Effective, not raw. This data ends in September 2021, so a location
+    # with 100 ratings is not carrying 100 ratings' worth of evidence about
+    # today, and the error bar has to say so. At chain scale it changes
+    # nothing (27,000 decays to thousands and the sampling term stays
+    # negligible); at a branch with 60 old ratings it roughly doubles.
+    n = max(float(rating.get("n_eff", rating["n"])), 1.0)
     # Star sd is ~1.2 across this corpus; /2 puts it on the -1..+1 scale.
     sampling = (cal.slope * (1.2 / 2.0) / math.sqrt(n)) ** 2
     return sampling + cal.residual_sd**2
@@ -178,14 +183,16 @@ def combine(
     have_google = (
         rating is not None
         and cal is not None
-        and int(rating["n"]) >= MIN_GOOGLE_RATINGS
+        and float(rating.get("n_eff", rating["n"])) >= MIN_GOOGLE_RATINGS
     )
     if reddit is None and not have_google:
         return None
 
     if have_google:
         assert rating is not None and cal is not None  # narrowed above
-        g_value = cal.apply(float(rating["norm"]))
+        # The decayed value where it exists: recency should move the number
+        # as well as the confidence, even though on this corpus it barely does.
+        g_value = cal.apply(float(rating.get("norm_recent", rating["norm"])))
         g_var = google_variance(rating, cal)
     else:
         g_value = g_var = 0.0

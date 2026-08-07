@@ -542,6 +542,26 @@ def branch_totals_from(
     return dict(totals)
 
 
+def headline_half_life(cells: Mapping[tuple[str, str], Cell]) -> float:
+    """The rate at which the headline number actually ages.
+
+    Store totals are an evidence-weighted mix of categories with half-lives
+    from 1.5 to 7 years, so the mix ages at neither the default nor any one
+    category's rate — it comes out near 4.7y on this corpus. Anything
+    compared against that number should be decayed at the same rate, or the
+    comparison quietly favours whichever side is aged more gently.
+    """
+    from .extract import NON_SHOPPING_CATEGORIES
+
+    num = den = 0.0
+    for (_store, category), cell in cells.items():
+        if category in NON_SHOPPING_CATEGORIES:
+            continue
+        num += cell.weight * half_life_for(category)
+        den += cell.weight
+    return num / den if den else DEFAULT_HALF_LIFE_YEARS
+
+
 def _cell_view(cell: Cell, max_examples: int) -> dict[str, Any]:
     level = cell.price_level()
     return {
@@ -634,6 +654,7 @@ def aggregate(
         "stores": stores,
         "branches": branches,
         "items": item_index,
+        "headline_half_life_years": round(headline_half_life(chain), 3),
         "branch_totals": branch_view,
         "store_totals": {
             store: {

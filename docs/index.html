@@ -100,6 +100,7 @@
       <label>Google population
         <select id="cross-pop">
           <option value="norm">all ratings</option>
+          <option value="norm_recent">recency-weighted (as the merge uses)</option>
           <option value="norm_long">only reviews with a paragraph</option>
         </select>
       </label>
@@ -121,6 +122,7 @@
         <th class="num">Gap</th>
         <th class="num">★ mean</th>
         <th class="num">Ratings</th>
+        <th class="num">after decay</th>
         <th class="num">Median</th>
       </tr></thead>
       <tbody></tbody>
@@ -224,6 +226,16 @@
         would selectively rehabilitate the stores this corpus is hardest on,
         and the output would read as new evidence rather than as a change in
         which source was doing the talking.</p>
+      <p>Both sides are aged at the same rate. The corpus decays old claims
+        faster for things that change quickly than for structural price gaps,
+        which works out to an effective half-life of about
+        <span id="m-hl">4.7</span> years for the headline number; the Google
+        side is decayed at exactly that, taken from the corpus rather than
+        picked. It barely moves the ratings — they drifted only +0.10 stars
+        across 2016&ndash;2021 — but it cuts their <em>weight</em> to roughly a
+        third, which is the honest treatment of evidence that stops in
+        September 2021. The "after decay" column is what those ratings are
+        worth today.</p>
       <p>There is a second layer. Restrict Google to reviews whose author
         wrote a paragraph — the population closest to a Reddit comment — and
         the mean drops 0.36 stars, halving the gap. People tap five stars on

@@ -21,7 +21,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from groceries.crosscheck import build  # noqa: E402
+from groceries.crosscheck import DEFAULT_HALF_LIFE, build  # noqa: E402
 from groceries.jsonl import write_atomic  # noqa: E402
 from groceries.paths import DATA  # noqa: E402
 
@@ -29,6 +29,7 @@ GL = DATA / "googlelocal"
 REVIEWS = GL / "reviews-matched.jsonl.gz"
 META = GL / "matched_meta.json"
 LOCATIONS = DATA / "locations.json"
+VERDICTS_FILE = DATA / "extraction" / "store_verdicts.json"
 OUT = DATA / "crosscheck.json"
 
 # The only fields that leave the source file. `text` is replaced by its
@@ -59,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--meta", type=Path, default=META)
     parser.add_argument("--locations", type=Path, default=LOCATIONS)
     parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument("--verdicts", type=Path, default=VERDICTS_FILE)
+    parser.add_argument("--now", type=int, default=None,
+                        help="evaluation time; defaults to the wall clock")
     return parser
 
 
@@ -78,16 +82,26 @@ def main(argv: list[str] | None = None) -> int:
     google_places = json.loads(args.meta.read_text(encoding="utf-8"))
     osm_places = json.loads(args.locations.read_text(encoding="utf-8"))["places"]
 
-    block = build(reviews, google_places, osm_places)
+    # Age the Google side at the same rate the Reddit headline ages, taken
+    # from the verdicts rather than chosen here — otherwise the comparison
+    # favours whichever source is decayed more gently.
+    half_life = DEFAULT_HALF_LIFE
+    if args.verdicts.exists():
+        v = json.loads(args.verdicts.read_text(encoding="utf-8"))
+        half_life = float(v.get("headline_half_life_years", DEFAULT_HALF_LIFE))
+    block = build(reviews, google_places, osm_places, args.now, half_life)
     write_atomic(args.out, [json.dumps(block, indent=1)])
 
     print(f"{block['n_reviews']:,} ratings over {block['n_locations']} locations")
     print(f"{block['n_matched_to_map']} matched to an OSM pin")
-    print(f"coverage {block['coverage']}, median {block['median_date']}\n")
-    print(f"{'store':<22}{'google':>8}{'n':>8}{'thin':>6}")
-    print("-" * 44)
+    print(f"coverage {block['coverage']}, median {block['median_date']}")
+    print(f"decayed at {block['half_life_years']}y half-life "
+          f"(matched to the Reddit headline)\n")
+    print(f"{'store':<22}{'all★':>7}{'recent★':>9}{'n':>9}{'n_eff':>9}")
+    print("-" * 56)
     for store, r in sorted(block["stores"].items(), key=lambda kv: -kv[1]["n"]):
-        print(f"{store:<22}{r['mean']:>8.2f}{r['n']:>8,}{'  yes' if r['thin'] else '':>6}")
+        print(f"{store:<22}{r['mean']:>7.2f}{r['mean_recent']:>9.2f}"
+              f"{r['n']:>9,}{r['n_eff']:>9,.0f}")
     print(f"\nwrote {args.out}")
     return 0
 

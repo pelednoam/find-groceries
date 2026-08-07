@@ -94,6 +94,63 @@ class TestSummarise:
             assert leak not in blob, leak
 
 
+NOW_2026 = 1_785_000_000       # 2026-08, in seconds
+RECENT_MS = 1_780_000_000_000  # 2026-06, in milliseconds like the dataset
+
+
+class TestRecencyDecay:
+    """The Google side must age at the same rate as the Reddit side.
+
+    Decaying only one source is a thumb on the scale for whichever is aged
+    more gently, and the corpus this is compared against decays hard.
+    """
+
+    def test_old_reviews_lose_weight(self) -> None:
+        old = crosscheck.summarise([review(time=Y2018)] * 100, NOW_2026, 4.72)
+        new = crosscheck.summarise([review(time=RECENT_MS)] * 100, NOW_2026, 4.72)
+        assert old is not None and new is not None
+        assert old["n_eff"] < new["n_eff"]
+        assert new["n_eff"] == pytest.approx(100, rel=0.05)
+
+    def test_effective_n_is_never_the_raw_count_for_old_data(self) -> None:
+        got = crosscheck.summarise([review(time=Y2018)] * 1000, NOW_2026, 4.72)
+        assert got is not None
+        assert got["n"] == 1000
+        assert 200 < got["n_eff"] < 500, got["n_eff"]
+
+    def test_the_mean_tilts_toward_recent_reviews(self) -> None:
+        mixed = ([review(time=Y2018, rating=1)] * 50
+                 + [review(time=RECENT_MS, rating=5)] * 50)
+        got = crosscheck.summarise(mixed, NOW_2026, 4.72)
+        assert got is not None
+        assert got["mean"] == pytest.approx(3.0)
+        assert got["mean_recent"] > got["mean"], "recent 5s should pull it up"
+
+    def test_a_short_half_life_decays_harder(self) -> None:
+        slow = crosscheck.summarise([review(time=Y2018)] * 100, NOW_2026, 8.0)
+        fast = crosscheck.summarise([review(time=Y2018)] * 100, NOW_2026, 1.0)
+        assert slow is not None and fast is not None
+        assert fast["n_eff"] < slow["n_eff"]
+
+    def test_undecayed_values_are_still_carried(self) -> None:
+        """The cross-check tab shows what Google actually says; only the
+        merge uses the decayed figure. Both have to survive."""
+        got = crosscheck.summarise([review()] * 30, NOW_2026, 4.72)
+        assert got is not None
+        assert "norm" in got and "norm_recent" in got
+
+    def test_build_records_the_rate_it_used(self) -> None:
+        block = crosscheck.build(
+            [review(gmap_id="g1")] * 30, [], [], NOW_2026, 4.72
+        )
+        assert block["half_life_years"] == 4.724 or block["half_life_years"] == 4.72
+
+    def test_future_timestamps_do_not_gain_weight(self) -> None:
+        got = crosscheck.summarise([review(time=NOW_2026 * 1000 + 10**10)] * 10,
+                                   NOW_2026, 4.72)
+        assert got is not None and got["n_eff"] == pytest.approx(10, rel=0.01)
+
+
 class TestBuckets:
     def test_by_store(self) -> None:
         got = crosscheck.by_store([review(store="Aldi"), review(store="Costco")])
@@ -229,7 +286,8 @@ class TestPublishedCrossCheck:
         cc = payload.get("crosscheck")
         if not cc:
             pytest.skip("no cross-check in this build")
-        allowed = {"n", "mean", "norm", "n_long", "mean_long", "norm_long",
+        allowed = {"n", "mean", "norm", "n_eff", "mean_recent", "norm_recent",
+                   "n_long", "mean_long", "norm_long",
                    "thin", "first", "last", "median_date"}
         for rating in list(cc["stores"].values()) + list(cc["locations"].values()):
             assert set(rating) <= allowed, set(rating) - allowed

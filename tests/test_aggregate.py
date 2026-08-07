@@ -481,6 +481,41 @@ class TestChainRollup:
         }
 
 
+class TestHeadlineHalfLife:
+    """Anything compared against the headline number must age at its rate."""
+
+    def test_mixes_the_category_half_lives_by_evidence(self) -> None:
+        cells, _ = aggregate.build(
+            [claim(category="price_overall"),          # 7y
+             claim(category="crowding_hours", claim="x")],  # 2y
+            NOW,
+        )
+        got = aggregate.headline_half_life(aggregate.chain_rollup(cells))
+        assert 2.0 < got < 7.0
+
+    def test_evidence_moves_the_mix(self) -> None:
+        heavy_slow = [claim(category="price_overall", source_key=f"c_b_{i}",
+                            author=f"a{i}") for i in range(10)]
+        one_fast = [claim(category="crowding_hours", claim="x")]
+        cells, _ = aggregate.build(heavy_slow + one_fast, NOW)
+        got = aggregate.headline_half_life(aggregate.chain_rollup(cells))
+        assert got > 6.0, "ten price claims should dominate one crowding claim"
+
+    def test_company_claims_do_not_set_the_rate(self) -> None:
+        cells, _ = aggregate.build(
+            [claim(category="store_lifecycle")], NOW      # 1y, non-shopping
+        )
+        got = aggregate.headline_half_life(aggregate.chain_rollup(cells))
+        assert got == aggregate.DEFAULT_HALF_LIFE_YEARS
+
+    def test_no_evidence_falls_back_to_the_default(self) -> None:
+        assert aggregate.headline_half_life({}) == aggregate.DEFAULT_HALF_LIFE_YEARS
+
+    def test_it_reaches_the_verdict_document(self) -> None:
+        out = aggregate.aggregate([claim()], now=NOW, min_weight=0.0)
+        assert out["headline_half_life_years"] == aggregate.DEFAULT_HALF_LIFE_YEARS
+
+
 class TestBranchTotals:
     def test_rolls_a_branch_up_across_categories(self) -> None:
         cells, _ = aggregate.build(

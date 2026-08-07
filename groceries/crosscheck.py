@@ -20,6 +20,18 @@ gap to +0.23. People tap five stars on the way out and write prose when
 annoyed, so *which* Google number you quote is itself a choice. Both are
 carried here rather than one being picked silently.
 
+**Recency.** The Reddit side decays old claims; the Google side must too, or
+the comparison quietly favours whichever source is aged more gently. Both are
+decayed at the same rate — the evidence-weighted half-life of the Reddit
+headline itself, ~4.7y on this corpus, rather than a number picked here.
+
+Decay does two things, and the second matters far more. It re-weights the mean
+toward recent reviews, which barely moves anything: ratings drifted only +0.10
+stars across 2016-2021, so most stores shift by hundredths. And it shrinks the
+*effective* sample, which matters a great deal — this data stops in September
+2021, so a location with 100 ratings is carrying nowhere near 100 ratings'
+worth of evidence about today, and its error bar should say so.
+
 **Statistics only — no review text.** The underlying data is a research
 dataset (McAuley Lab, UCSD) offered for research with citation. Aggregate
 counts and means derived from it are a different thing from republishing
@@ -34,6 +46,10 @@ import statistics
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final, TypedDict
+
+from .aggregate import DEFAULT_HALF_LIFE_YEARS, recency_weight
+
+DEFAULT_HALF_LIFE: Final = DEFAULT_HALF_LIFE_YEARS
 
 CITATION: Final = (
     "Google Local review data (to Sept 2021), McAuley Lab, UC San Diego — "
@@ -64,6 +80,10 @@ class Rating(TypedDict):
     n: int
     mean: float
     norm: float          # -1..+1, comparable with our sentiment
+    #: Sample size after recency decay — what this evidence is worth *now*.
+    n_eff: float
+    mean_recent: float
+    norm_recent: float
     n_long: int
     mean_long: float | None
     norm_long: float | None
@@ -82,17 +102,38 @@ def month(epoch_seconds: float) -> str:
     return time.strftime("%Y-%m", time.gmtime(epoch_seconds))
 
 
-def summarise(reviews: Sequence[Mapping[str, Any]]) -> Rating | None:
+def summarise(
+    reviews: Sequence[Mapping[str, Any]],
+    now: int | None = None,
+    half_life: float = DEFAULT_HALF_LIFE,
+) -> Rating | None:
     """Aggregate one bucket of reviews. None when the bucket is empty."""
-    return _rating(reviews) if reviews else None
+    return _rating(reviews, now, half_life) if reviews else None
 
 
-def _rating(reviews: Sequence[Mapping[str, Any]]) -> Rating:
+def _rating(
+    reviews: Sequence[Mapping[str, Any]],
+    now: int | None = None,
+    half_life: float = DEFAULT_HALF_LIFE,
+) -> Rating:
     """Aggregate a bucket already known to be non-empty."""
     stars = [float(r["rating"]) for r in reviews]
     # The dataset stores milliseconds.
     times = sorted(int(r["time"]) / 1000 for r in reviews)
     mean = statistics.fmean(stars)
+
+    stamp = int(time.time()) if now is None else now
+    weights = [
+        recency_weight(int(r["time"]) // 1000, stamp, half_life) for r in reviews
+    ]
+    total_w = sum(weights)
+    # Effective sample size, not a count. 27,000 ratings with a 2018 median
+    # are not 27,000 ratings' worth of evidence about 2026.
+    n_eff = total_w
+    mean_recent = (
+        sum(w * s for w, s in zip(weights, stars, strict=True)) / total_w
+        if total_w > 0 else mean
+    )
     long_stars = [
         float(r["rating"]) for r in reviews
         if int(r.get("text_len", 0)) >= LONG_REVIEW_CHARS
@@ -102,6 +143,9 @@ def _rating(reviews: Sequence[Mapping[str, Any]]) -> Rating:
         n=len(stars),
         mean=round(mean, 2),
         norm=normalise(mean),
+        n_eff=round(n_eff, 1),
+        mean_recent=round(mean_recent, 2),
+        norm_recent=normalise(mean_recent),
         n_long=len(long_stars),
         mean_long=None if mean_long is None else round(mean_long, 2),
         norm_long=None if mean_long is None else normalise(mean_long),
@@ -113,7 +157,8 @@ def _rating(reviews: Sequence[Mapping[str, Any]]) -> Rating:
 
 
 def _bucket(
-    reviews: Iterable[Mapping[str, Any]], key: str
+    reviews: Iterable[Mapping[str, Any]], key: str,
+    now: int | None = None, half_life: float = DEFAULT_HALF_LIFE,
 ) -> dict[str, Rating]:
     """Group by one field and aggregate. Buckets are non-empty by
     construction, so `_rating` is used directly rather than the None-checking
@@ -121,15 +166,19 @@ def _bucket(
     buckets: dict[str, list[Mapping[str, Any]]] = {}
     for r in reviews:
         buckets.setdefault(str(r[key]), []).append(r)
-    return {name: _rating(rows) for name, rows in buckets.items()}
+    return {
+        name: _rating(rows, now, half_life) for name, rows in buckets.items()
+    }
 
 
-def by_store(reviews: Iterable[Mapping[str, Any]]) -> dict[str, Rating]:
-    return _bucket(reviews, "store")
+def by_store(reviews: Iterable[Mapping[str, Any]], now: int | None = None,
+             half_life: float = DEFAULT_HALF_LIFE) -> dict[str, Rating]:
+    return _bucket(reviews, "store", now, half_life)
 
 
-def by_location(reviews: Iterable[Mapping[str, Any]]) -> dict[str, Rating]:
-    return _bucket(reviews, "gmap_id")
+def by_location(reviews: Iterable[Mapping[str, Any]], now: int | None = None,
+                half_life: float = DEFAULT_HALF_LIFE) -> dict[str, Rating]:
+    return _bucket(reviews, "gmap_id", now, half_life)
 
 
 def metres(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -182,9 +231,11 @@ def build(
     reviews: Sequence[Mapping[str, Any]],
     google_places: Sequence[Mapping[str, Any]],
     osm_places: Sequence[Mapping[str, Any]],
+    now: int | None = None,
+    half_life: float = DEFAULT_HALF_LIFE,
 ) -> dict[str, Any]:
     """The whole cross-check block, ready to publish."""
-    locations = by_location(reviews)
+    locations = by_location(reviews, now, half_life)
     linked = match_to_places(google_places, osm_places)
     # Keyed by OSM id so the map can look a pin up directly.
     by_osm = {
@@ -199,6 +250,7 @@ def build(
         "n_matched_to_map": len(by_osm),
         "coverage": month(times[0]) + " to " + month(times[-1]) if times else "",
         "median_date": month(times[len(times) // 2]) if times else "",
-        "stores": by_store(reviews),
+        "half_life_years": round(half_life, 3),
+        "stores": by_store(reviews, now, half_life),
         "locations": by_osm,
     }

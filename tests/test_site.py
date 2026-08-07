@@ -378,6 +378,26 @@ class TestPayloadContract:
         emitted = set(site.build_payload(verdicts(), locations()))
         assert declared - emitted == set(), "TypeScript declares fields Python does not emit"
 
+    def _interface(self, name: str) -> set[str]:
+        src = (Path(__file__).resolve().parent.parent
+               / "docs" / "src" / "types.ts").read_text(encoding="utf-8")
+        body = src.split(f"interface {name} {{", 1)[1].split("\n}", 1)[0]
+        return {
+            line.strip().split(":", 1)[0].rstrip("?")
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith(("/", "*"))
+        }
+
+    def test_the_rating_shape_matches_too(self) -> None:
+        """Rating gained n_eff/mean_recent/norm_recent when decay landed; the
+        UI reads them, so TypeScript has to know they exist."""
+        from groceries.crosscheck import summarise
+
+        emitted = summarise([{"rating": 4, "time": 1_600_000_000_000,
+                              "text_len": 200}], 1_785_000_000, 4.72)
+        assert emitted is not None
+        assert set(emitted) == self._interface("Rating")
+
     def test_the_place_shape_matches_too(self, declared: set[str]) -> None:
         src = (Path(__file__).resolve().parent.parent
                / "docs" / "src" / "types.ts").read_text(encoding="utf-8")

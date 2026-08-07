@@ -153,8 +153,11 @@ def _merge_block(
     totals = verdicts["store_totals"]
     ratings: Mapping[str, Any] = crosscheck["stores"]
 
+    # Fit on the decayed values, because those are what `combine` will feed
+    # back in. Fitting on all-time means and applying to recent ones would
+    # put a systematic tilt through every merged number.
     pairs = [
-        (float(r["norm"]), float(totals[store]["sentiment"]))
+        (_google_norm(r), float(totals[store]["sentiment"]))
         for store, r in ratings.items()
         if store in totals and _usable(r) and not r.get("thin", False)
     ]
@@ -227,6 +230,11 @@ def _merge_branches(
     return out
 
 
+def _google_norm(rating: Mapping[str, Any]) -> float:
+    """The recency-decayed value, falling back to the all-time one."""
+    return float(rating.get("norm_recent", rating["norm"]))
+
+
 def _usable(rating: Mapping[str, Any]) -> bool:
     """Whether a rating carries what the merge needs.
 
@@ -243,8 +251,11 @@ def _pool(ratings: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     if not usable:
         return None
     total = sum(int(r["n"]) for r in usable)
-    norm = sum(float(r["norm"]) * int(r["n"]) for r in usable) / total
-    return {"n": total, "norm": norm}
+    # Pool on effective weight, so an old location does not out-vote a
+    # recent one purely on raw count.
+    eff = sum(float(r.get("n_eff", r["n"])) for r in usable) or 1.0
+    norm = sum(_google_norm(r) * float(r.get("n_eff", r["n"])) for r in usable) / eff
+    return {"n": total, "n_eff": eff, "norm": norm, "norm_recent": norm}
 
 
 def build_payload(
