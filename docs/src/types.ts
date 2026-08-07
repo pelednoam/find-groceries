@@ -157,6 +157,21 @@ interface MergeBlock {
   note: string;
 }
 
+/** Reddit and Google *claims* combined — same extractor, same schema, so a
+ *  like-for-like combination rather than a translation between instruments.
+ *  Statistics only: no review text is published, nor any paraphrase of it. */
+interface ReviewMerge {
+  calibration: MergeCalibration;
+  n_review_claims: number;
+  /** store -> overall */
+  stores: Record<string, MergedValue>;
+  /** store -> category -> combined */
+  categories: Record<string, Record<string, MergedValue>>;
+  /** store -> branch -> category -> combined */
+  branches: Record<string, Record<string, Record<string, MergedValue>>>;
+  note: string;
+}
+
 interface Payload {
   generated_at: string;
   method: Method;
@@ -168,6 +183,8 @@ interface Payload {
   /** Reddit and Google combined after an affine calibration. Overall only —
    *  Google has no per-category opinion to merge. */
   merged: MergeBlock | null;
+  /** claim-level merge, which star ratings could not support */
+  reviews: ReviewMerge | null;
   totals: Record<string, Totals>;
   /** store -> category -> cell */
   stores: Record<string, Record<string, Cell>>;

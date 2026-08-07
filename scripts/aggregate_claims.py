@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=VERDICTS)
     parser.add_argument("--store", default=None)
     parser.add_argument("--min-weight", type=float, default=DEFAULT_MIN_WEIGHT)
+    parser.add_argument("--no-provenance", action="store_true",
+                        help="skip pipeline counts (for a secondary corpus)")
     return parser
 
 
@@ -75,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = aggregate(
         claims,
         min_weight=args.min_weight,
-        corpus=corpus_provenance(args.claims),
+        corpus=None if args.no_provenance else corpus_provenance(args.claims),
     )
     write_verdicts(summary, args.out)
 

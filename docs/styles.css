@@ -238,3 +238,10 @@ footer { padding: 18px 20px 40px; color: var(--muted); font-size: 0.84rem; }
   display: flex; justify-content: space-between; gap: 12px;
   font-size: 0.8rem; color: var(--muted); flex-wrap: wrap;
 }
+
+/* ── combined chip ────────────────────────────────────────────────── */
+.chip {
+  margin-left: auto; font-size: 0.82rem; padding: 1px 9px;
+  border: 1px solid var(--line); border-radius: 20px; white-space: nowrap;
+}
+.chip.conflict { border-color: var(--bad); }

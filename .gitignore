@@ -29,3 +29,6 @@ docs/ensemble_review_result_schema.json
 node_modules/
 
 # Google Local slice — regenerable via scripts/fetch_google_local.py
+
+# Google review claims — regenerable, and the raw text must not be published
+data/extraction/reviews_*

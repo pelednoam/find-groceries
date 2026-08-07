@@ -25,6 +25,8 @@ def cell(**over: Any) -> dict[str, Any]:
         "price_level": -0.42,
         "price_signal": "cheap",
         "price_distribution": {"cheap": 9, "expensive": 1},
+        "score": 7.35,
+        "valenced_weight": 12.0,
         "evidence": [
             {"claim": f"claim {i}", "date": "2025-0{}".format(i + 1),
              "permalink": f"/r/boston/comments/a/_/c{i}/", "confidence": "high",
@@ -230,7 +232,8 @@ class TestMergeInPayload:
         b = merged["branches"]["S0"]["Somerville"]
         assert b["r"] == -0.4 and b["g"] is not None
         # pooled norm = (400*0.8 + 200*0.6)/600 = 0.733, so both pins counted
-        assert b["g"] == pytest.approx(-4.25 + 7.5 * 0.7333, abs=0.01)
+        # The affine map would give +1.25; sentiment is bounded at +1.
+        assert b["g"] == pytest.approx(1.0, abs=0.01)
         assert b["share"] < 0.1, "0.6 units of evidence must not outvote 600 ratings"
 
     def test_a_branch_with_no_reddit_claims_still_gets_an_answer(self) -> None:
@@ -292,6 +295,87 @@ class TestMergeInPayload:
         cc = {"stores": {"S0": {"n": 500, "norm": 0.6, "thin": False}},
               "locations": {}}
         assert site.build_payload(self._verdicts(), None, cc)["merged"] is None
+
+
+class TestReviewMergeInPayload:
+    def _reviews(self) -> dict[str, Any]:
+        return {
+            "store_totals": {
+                f"S{i}": {"n_claims": 200, "weighted_evidence": 60.0,
+                          "sentiment": -0.3 + 0.12 * i,
+                          "score": (-0.3 + 0.12 * i) * 60.0,
+                          "valenced_weight": 60.0,
+                          "insufficient_evidence": False}
+                for i in range(8)
+            },
+            "stores": {f"S{i}": {"produce": cell()} for i in range(8)},
+            "branches": {},
+        }
+
+    def _verdicts8(self) -> dict[str, Any]:
+        v = verdicts()
+        v["store_totals"] = {
+            f"S{i}": {"n_claims": 100, "weighted_evidence": 40.0,
+                      "sentiment": -0.5 + 0.15 * i,
+                      "score": (-0.5 + 0.15 * i) * 40.0, "valenced_weight": 40.0,
+                      "insufficient_evidence": False}
+            for i in range(8)
+        }
+        v["stores"] = {f"S{i}": {"produce": cell()} for i in range(8)}
+        v["branches"] = {"S0": {"Somerville": {"produce": cell()}}}
+        v["branch_totals"] = {}
+        v["items"] = {}
+        return v
+
+    def test_absent_without_review_verdicts(self) -> None:
+        assert site.build_payload(self._verdicts8())["reviews"] is None
+
+    def test_merges_per_store_and_per_category(self) -> None:
+        """What extracting the text bought: star ratings gave one number per
+        shop, so the combination could only touch the overall verdict."""
+        out = site.build_payload(self._verdicts8(), None, None, self._reviews())
+        assert out["reviews"] is not None
+        assert len(out["reviews"]["stores"]) == 8
+        assert "produce" in out["reviews"]["categories"]["S0"]
+
+    def test_the_single_source_views_are_untouched(self) -> None:
+        v = self._verdicts8()
+        before = site.build_payload(v)
+        after = site.build_payload(v, None, None, self._reviews())
+        assert before["stores"] == after["stores"]
+        assert before["totals"] == after["totals"]
+
+    def test_the_note_states_the_publishing_rule(self) -> None:
+        out = site.build_payload(self._verdicts8(), None, None, self._reviews())
+        assert "no review text" in out["reviews"]["note"]
+
+    def test_no_claim_text_reaches_the_block(self) -> None:
+        out = site.build_payload(self._verdicts8(), None, None, self._reviews())
+        blob = json.dumps(out["reviews"])
+        # "n_review_claims" is a count, not text — look for the fields that
+        # would actually carry prose.
+        for leak in ('"claim"', '"evidence"', '"t"', '"permalink"'):
+            assert leak not in blob, leak
+
+    def test_a_store_with_no_valenced_claims_is_skipped(self) -> None:
+        r = self._reviews()
+        r["store_totals"]["S0"].update(score=0.0, valenced_weight=0.0,
+                                       weighted_evidence=0.0)
+        out = site.build_payload(self._verdicts8(), None, None, r)
+        assert "g" not in out["reviews"]["stores"]["S0"]
+
+    def test_branch_categories_are_merged_too(self) -> None:
+        v = self._verdicts8()
+        r = self._reviews()
+        r["branches"] = {"S0": {"Somerville": {"produce": cell()}}}
+        out = site.build_payload(v, None, None, r)
+        assert "produce" in out["reviews"]["branches"]["S0"]["Somerville"]
+
+    def test_too_few_comparable_stores_yields_nothing(self) -> None:
+        r = self._reviews()
+        for t in r["store_totals"].values():
+            t["n_claims"] = 1
+        assert site.build_payload(self._verdicts8(), None, None, r)["reviews"] is None
 
 
 class TestSlimCell:

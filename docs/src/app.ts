@@ -635,7 +635,21 @@ function renderMap(): void {
 
 /* ── view: store detail ─────────────────────────────────────────────── */
 
-function cellBlock(name: string, cell: Cell): HTMLElement {
+/** A one-line combined figure to sit inside a category's summary row. */
+function combinedChip(m: MergedValue | undefined): HTMLElement | null {
+  if (!m || m.g === undefined || m.r === undefined) return null;
+  const chip = el("span", {
+    class: "chip" + (m.conflict ? " conflict" : ""),
+    title: `Reddit ${fmt(m.r)}, reviews ${fmt(m.g)}, `
+         + `${(m.share * 100).toFixed(0)}% of the weight from Reddit`,
+  });
+  chip.append(el("span", { class: "score " + cls(m.v), text: fmt(m.v) }));
+  chip.append(el("span", { class: "muted", text: " combined" }));
+  if (m.conflict) chip.append(el("span", { class: "muted", text: " ⚠" }));
+  return chip;
+}
+
+function cellBlock(name: string, cell: Cell, merged?: MergedValue): HTMLElement {
   const d = el("details", { class: "cell" });
   const sum = el("summary", {}, [
     el("span", { class: "cat", text: titleCase(name) }),
@@ -648,6 +662,8 @@ function cellBlock(name: string, cell: Cell): HTMLElement {
       text: cell.p,
     }));
   }
+  const chip = combinedChip(merged);
+  if (chip) sum.append(chip);
   d.append(sum);
   const quotes = el("div", { class: "quotes" });
   for (const q of cell.e) {
@@ -742,7 +758,17 @@ function renderStore(wantBranch?: string): void {
     body.append(el("p", { class: "empty", text: "No claims above the evidence threshold." }));
   }
   body.append(el("h2", { text: "By category" }));
-  for (const [name, cell] of ordered) body.append(cellBlock(name, cell));
+  const combined = pick.value
+    ? data().reviews?.branches[store]?.[pick.value]
+    : data().reviews?.categories[store];
+  if (combined) {
+    body.append(el("p", { class: "muted",
+      text: "Each row also shows the figure combining this corpus with "
+          + "Google review claims; hover for the split." }));
+  }
+  for (const [name, cell] of ordered) {
+    body.append(cellBlock(name, cell, combined?.[name]));
+  }
 
   const items = data().items[store] ?? {};
   const topItems = Object.entries(items).sort((a, b) => b[1].w - a[1].w).slice(0, 20);
@@ -849,6 +875,8 @@ function fillMethod(): void {
     ["Mapped locations", data().places.length],
     ["Google ratings (cross-check)", (data().crosscheck?.n_reviews ?? 0).toLocaleString()],
     ["Google half-life", (data().crosscheck?.half_life_years ?? 0) + " years"],
+    ["Review-derived claims", (data().reviews?.n_review_claims ?? 0).toLocaleString()],
+    ["Claim-merge slope", data().reviews?.calibration.slope ?? "n/a"],
     ["Calibration slope", data().merged?.calibration.slope ?? "n/a"],
     ["Calibration LOO error", data().merged?.calibration.loo_rmse ?? "n/a"],
     ["Shrinkage constant", data().method.shrinkage_k],

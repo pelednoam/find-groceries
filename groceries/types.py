@@ -60,7 +60,19 @@ class Claim(TypedDict):
     transient: bool
 
 
-class SourcedClaim(Claim):
+class OptionalProvenance(TypedDict, total=False):
+    """Provenance only some sources have.
+
+    Review-derived claims know exactly which shop they came from, because the
+    listing says so. Reddit claims never do. Declared here rather than left
+    off the type, so the field that carries a claim back to its branch is
+    something the checker knows about.
+    """
+
+    gmap_id: str
+
+
+class SourcedClaim(Claim, OptionalProvenance):
     """A claim with the provenance the pipeline attaches after extraction.
 
     Provenance is mandatory, not optional: `attach_provenance` always writes

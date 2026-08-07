@@ -46,6 +46,13 @@ from groceries.select import read_candidates  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--working-set", type=Path, default=WORKING_SET)
+    # Output paths are derived from the working set unless overridden. A run
+    # over a different corpus MUST NOT append to the default claims file:
+    # doing so mixed 431 Google-derived claims into the Reddit corpus, and
+    # only the `subreddit` field made them separable afterwards.
+    parser.add_argument("--claims", type=Path, default=None)
+    parser.add_argument("--done", type=Path, default=None)
+    parser.add_argument("--failed", type=Path, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument(
@@ -89,6 +96,31 @@ def main(argv: list[str] | None = None) -> int:
         lock.unlink(missing_ok=True)
 
 
+def output_paths(args: argparse.Namespace) -> Paths:
+    """Where this run writes.
+
+    The default working set keeps the canonical names. Any other working set
+    gets its own trio, named after it, so two corpora can never share a
+    claims file or a resume log — a shared resume log is the worse of the
+    two, because it silently marks the other corpus's documents as done.
+    """
+    if args.working_set.resolve() == WORKING_SET.resolve():
+        default = Paths(claims=CLAIMS, done=DONE, failed=FAILED)
+    else:
+        stem = args.working_set.stem.replace("_working_set", "")
+        d = args.working_set.parent
+        default = Paths(
+            claims=d / f"{stem}_claims.jsonl",
+            done=d / f"{stem}_done.txt",
+            failed=d / f"{stem}_failed.jsonl",
+        )
+    return Paths(
+        claims=args.claims or default.claims,
+        done=args.done or default.done,
+        failed=args.failed or default.failed,
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     if not args.working_set.exists():
         print(f"no working set at {args.working_set}")
@@ -103,7 +135,8 @@ def _run(args: argparse.Namespace) -> int:
         print(f"refusing to run: {args.working_set} yielded no usable candidates.")
         print("Regenerate it with scripts/select_evaluative.py.")
         return 2
-    paths = Paths(claims=CLAIMS, done=DONE, failed=FAILED)
+    paths = output_paths(args)
+    print(f"claims -> {paths.claims.name}, resume -> {paths.done.name}")
 
     done = read_done(paths.done)
     if done:

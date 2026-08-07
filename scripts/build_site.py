@@ -23,6 +23,7 @@ from groceries.site import build_payload, write_payload  # noqa: E402
 SITE_DATA = ROOT / "docs" / "verdicts.json"
 LOCATIONS = DATA / "locations.json"
 CROSSCHECK = DATA / "crosscheck.json"
+REVIEW_VERDICTS = DATA / "extraction" / "review_verdicts.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=SITE_DATA)
     parser.add_argument("--locations", type=Path, default=LOCATIONS)
     parser.add_argument("--crosscheck", type=Path, default=CROSSCHECK)
+    parser.add_argument("--review-verdicts", type=Path, default=REVIEW_VERDICTS)
     return parser
 
 
@@ -54,7 +56,12 @@ def main(argv: list[str] | None = None) -> int:
         crosscheck = json.loads(args.crosscheck.read_text(encoding="utf-8"))
     else:
         print(f"no {args.crosscheck} — building without the Google cross-check.")
-    payload = build_payload(verdicts, locations, crosscheck)
+    reviews = None
+    if args.review_verdicts.exists():
+        reviews = json.loads(args.review_verdicts.read_text(encoding="utf-8"))
+    else:
+        print(f"no {args.review_verdicts} — building without review-derived claims.")
+    payload = build_payload(verdicts, locations, crosscheck, reviews)
     written = write_payload(payload, args.out)
 
     before = args.verdicts.stat().st_size
@@ -64,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
           f"{sum(len(v) for v in payload['items'].values())} items, "
           f"{len(payload['places'])} mapped locations "
           f"({sum(1 for p in payload['places'] if p.get('branch'))} linked to a branch)")
+    rv = payload.get("reviews")
+    if rv:
+        cats = sum(len(v) for v in rv["categories"].values())
+        print(f"review claims merged: {len(rv['stores'])} stores, {cats} store-categories, "
+              f"calibration slope {rv['calibration']['slope']}")
     cc = payload.get("crosscheck")
     if cc:
         print(f"cross-check: {cc['n_reviews']:,} Google ratings, "

@@ -76,7 +76,16 @@ class Calibration:
     loo_rmse: float
 
     def apply(self, google_norm: float) -> float:
-        return self.intercept + self.slope * google_norm
+        """Map onto the Reddit scale, clamped to it.
+
+        Sentiment is bounded at +-1 by construction — it is a weighted mean
+        of values in that range. An affine map with slope 1.35 can carry a
+        Google mean of -0.8 to -1.44, which is not a sentiment any amount of
+        evidence could produce, so the excess is not information. Matters at
+        claim level, where Google means reach the ends of the scale; the
+        star-rating map never got near them.
+        """
+        return max(-1.0, min(1.0, self.intercept + self.slope * google_norm))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +221,81 @@ class Merged:
         if self.google is not None:
             out["g"] = round(self.google, 3)
         return out
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One side's evidence for a cell: stage 3's raw ingredients."""
+
+    score: float
+    valenced_weight: float
+    n: int = 0
+
+    def mean(self) -> float:
+        return self.score / self.valenced_weight if self.valenced_weight else 0.0
+
+
+def calibrated(cell: Cell, cal: Calibration) -> tuple[float, float]:
+    """A Google-claim cell on the Reddit scale, with its variance.
+
+    Two terms again: the cell's own sampling error, scaled by the slope, and
+    the calibration residual. Extracting the review *text* rather than
+    reading its star rating shrinks both — the map has to undo 1.35x of
+    compression instead of 3.4x, and its out-of-sample error is 0.16 rather
+    than 0.27 — which is most of why claim-level merging is worth $63.
+    """
+    value = cal.apply(cell.mean())
+    sampling = (cal.slope**2) * (CLAIM_SPREAD**2) / max(cell.valenced_weight, 1e-9)
+    return value, sampling + cal.residual_sd**2
+
+
+def combine_cells(
+    reddit: Cell | None, google: Cell | None, cal: Calibration | None
+) -> Merged | None:
+    """Combine two claim-derived cells, then shrink once.
+
+    Both sides came out of the same extractor with the same schema, so this
+    is a like-for-like combination in a way the star-rating merge could never
+    be. The calibration is still needed — Google reviewers compress toward
+    the positive — but it is a gentle correction rather than a 3x rescale.
+    """
+    have_r = reddit is not None and reddit.valenced_weight > 0
+    have_g = google is not None and google.valenced_weight > 0 and cal is not None
+    if not have_r and not have_g:
+        return None
+
+    precision = weighted = 0.0
+    r_value = g_value = None
+    r_var = g_var = math.inf
+    if have_r:
+        assert reddit is not None
+        r_value = reddit.mean()
+        r_var = reddit_variance(reddit.valenced_weight)
+        precision += 1.0 / r_var
+        weighted += r_value / r_var
+    if have_g:
+        assert google is not None and cal is not None
+        g_value, g_var = calibrated(google, cal)
+        precision += 1.0 / g_var
+        weighted += g_value / g_var
+
+    raw = weighted / precision
+    shrunk = raw * precision / (precision + PRIOR_WEIGHT)
+    gap = 0.0
+    conflicted = False
+    if have_r and have_g:
+        assert r_value is not None and g_value is not None
+        gap = g_value - r_value
+        conflicted = abs(gap) > DISAGREEMENT_SIGMAS * math.sqrt(r_var + g_var)
+    return Merged(
+        shrunk,
+        math.sqrt(1.0 / (precision + PRIOR_WEIGHT)),
+        r_value,
+        g_value,
+        (1.0 / r_var) / precision if have_r else 0.0,
+        gap,
+        conflicted,
+    )
 
 
 def combine(

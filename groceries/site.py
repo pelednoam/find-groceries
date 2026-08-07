@@ -23,7 +23,13 @@ from typing import Any, Final
 
 from .jsonl import write_atomic
 from .locations import attach_branches
-from .merge import Calibration, combine, fit_calibration
+from .merge import (
+    Calibration,
+    Cell,
+    combine,
+    combine_cells,
+    fit_calibration,
+)
 
 # Evidence quotes per cell in the published payload. Three is what the UI
 # shows before "more"; the rest is weight the reader never sees.
@@ -31,6 +37,9 @@ SITE_EXAMPLES: Final = 3
 # Items below this much evidence are one passing remark and add noise to
 # search without adding an answer.
 MIN_ITEM_WEIGHT: Final = 1.0
+# A store needs this many claims on both sides before it can help fit the
+# calibration; below it the pair is noise with leverage.
+MIN_CLAIMS_TO_CALIBRATE: Final = 30
 
 # Everyday shopping words -> the category that answers them. Only needed for
 # words a shopper would write on a list; the UI falls back to the item index
@@ -136,6 +145,77 @@ def is_branch(name: str) -> bool:
     together implies a precision the region entries do not have.
     """
     return not REGION_HINTS.match(name.strip().casefold())
+
+
+def _review_block(
+    verdicts: Mapping[str, Any], reviews: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Reddit and Google *claims* combined, per store and per category.
+
+    Both sides came from the same extractor and the same schema, so this is
+    a like-for-like combination — unlike the star-rating merge, which had to
+    translate between two different instruments. Only numbers are published:
+    no review text, and no model paraphrase of it either.
+    """
+    if not reviews:
+        return None
+    r_totals = verdicts["store_totals"]
+    g_totals = reviews["store_totals"]
+
+    fittable = [
+        s for s in set(r_totals) & set(g_totals)
+        if float(r_totals[s].get("valenced_weight", 0)) > 0
+        and float(g_totals[s].get("valenced_weight", 0)) > 0
+        and int(g_totals[s]["n_claims"]) >= MIN_CLAIMS_TO_CALIBRATE
+        and int(r_totals[s]["n_claims"]) >= MIN_CLAIMS_TO_CALIBRATE
+    ]
+    pairs = [(_raw_mean(g_totals[s]), _raw_mean(r_totals[s])) for s in fittable]
+    weights = [float(r_totals[s]["valenced_weight"]) for s in fittable]
+    cal = fit_calibration(pairs, weights)
+    if cal is None:
+        return None
+
+    overall: dict[str, Any] = {}
+    for store in set(r_totals) | set(g_totals):
+        m = combine_cells(
+            _totals_cell(r_totals.get(store)), _totals_cell(g_totals.get(store)), cal,
+        )
+        if m is not None:
+            overall[store] = m.as_dict()
+
+    return {
+        "calibration": cal.as_dict(),
+        "n_review_claims": sum(
+            int(t["n_claims"]) for t in g_totals.values()
+        ),
+        "stores": overall,
+        "categories": _merge_categories(
+            verdicts["stores"], reviews["stores"], cal
+        ),
+        "branches": {
+            store: {
+                branch: _merge_categories(
+                    {branch: cats}, {branch: reviews["branches"].get(store, {}).get(branch, {})}, cal
+                ).get(branch, {})
+                for branch, cats in by_branch.items()
+            }
+            for store, by_branch in verdicts["branches"].items()
+        },
+        "note": (
+            "Both sides are claims from the same extractor, so this is a "
+            "like-for-like combination. Statistics only: no review text is "
+            "published, nor any paraphrase of it."
+        ),
+    }
+
+
+def _totals_cell(totals: Mapping[str, Any] | None) -> Cell | None:
+    if totals is None:
+        return None
+    score, vw = _evidence(totals)
+    if score is None or vw <= 0:
+        return None
+    return Cell(score=score, valenced_weight=vw, n=int(totals.get("n_claims", 0)))
 
 
 def _merge_block(
@@ -335,10 +415,46 @@ def _pool(ratings: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     return {"n": total, "n_eff": eff, "norm": norm, "norm_recent": norm}
 
 
+def _cells_from(view: Mapping[str, Any]) -> dict[str, Cell]:
+    """A verdict document's category cells as merge inputs."""
+    return {
+        name: Cell(
+            score=float(c.get("score", 0.0)),
+            valenced_weight=float(c.get("valenced_weight", 0.0)),
+            n=int(c.get("n_claims", 0)),
+        )
+        for name, c in view.items()
+    }
+
+
+def _merge_categories(
+    reddit: Mapping[str, Any],
+    google: Mapping[str, Any],
+    cal: Calibration | None,
+) -> dict[str, dict[str, Any]]:
+    """Merge per store and category.
+
+    This is what extracting the review text bought. Star ratings gave one
+    number per shop, so the combination could only touch the overall verdict;
+    claims carry a category, so "is the produce good at the Somerville
+    branch" now has two sources behind it instead of one.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for store in set(reddit) | set(google):
+        r_cells = _cells_from(reddit.get(store, {}))
+        g_cells = _cells_from(google.get(store, {}))
+        for category in set(r_cells) | set(g_cells):
+            m = combine_cells(r_cells.get(category), g_cells.get(category), cal)
+            if m is not None:
+                out.setdefault(store, {})[category] = m.as_dict()
+    return out
+
+
 def build_payload(
     verdicts: Mapping[str, Any],
     locations: Mapping[str, Any] | None = None,
     crosscheck: Mapping[str, Any] | None = None,
+    review_verdicts: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reshape the verdict document into the site payload."""
     stores = {s: slim_group(cats) for s, cats in verdicts["stores"].items()}
@@ -379,6 +495,7 @@ def build_payload(
             places.append(entry)
 
     merged = _merge_block(verdicts, crosscheck, places)
+    reviews = _review_block(verdicts, review_verdicts)
 
     return {
         "generated_at": verdicts["generated_at"],
@@ -389,6 +506,7 @@ def build_payload(
         # Carried whole and never merged into `stores`. See groceries/crosscheck.py.
         "crosscheck": dict(crosscheck) if crosscheck else None,
         "merged": merged,
+        "reviews": reviews,
         "totals": {
             s: {
                 "n": t["n_claims"],

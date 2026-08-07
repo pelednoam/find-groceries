@@ -568,6 +568,10 @@ def _cell_view(cell: Cell, max_examples: int) -> dict[str, Any]:
         "n_claims": cell.n,
         "weighted_evidence": round(cell.weight, 2),
         "sentiment": round(cell.sentiment(), 3),
+        # The un-shrunk ingredients, so a second source can be combined with
+        # this cell without the neutral prior being applied twice.
+        "score": round(cell.score, 4),
+        "valenced_weight": round(cell.valenced_weight, 4),
         "price_level": None if level is None else round(level, 3),
         "price_signal": cell.price_label(),
         "price_distribution": dict(cell.price_counts),

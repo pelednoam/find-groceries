@@ -237,6 +237,77 @@ class TestCombine:
         assert "g" not in d and d["r"] == 0.3
 
 
+class TestCombineCells:
+    """Claim-to-claim merging: both sides from the same extractor."""
+
+    def _cal(self) -> merge.Calibration:
+        cal = merge.fit_calibration(line(1.35, -0.36, noise=0.15))
+        assert cal is not None
+        return cal
+
+    def test_two_cells_combine(self) -> None:
+        m = merge.combine_cells(
+            merge.Cell(score=30.0, valenced_weight=50.0),
+            merge.Cell(score=40.0, valenced_weight=60.0),
+            self._cal(),
+        )
+        assert m is not None and m.reddit == pytest.approx(0.6)
+
+    def test_the_heavier_cell_leads(self) -> None:
+        cal = self._cal()
+        thin_google = merge.combine_cells(
+            merge.Cell(30.0, 50.0), merge.Cell(0.9, 1.0), cal)
+        fat_google = merge.combine_cells(
+            merge.Cell(30.0, 50.0), merge.Cell(900.0, 1000.0), cal)
+        assert thin_google is not None and fat_google is not None
+        assert thin_google.reddit_share > fat_google.reddit_share
+
+    def test_reddit_alone_reproduces_stage_three(self) -> None:
+        m = merge.combine_cells(merge.Cell(35.0, 50.0), None, self._cal())
+        assert m is not None
+        assert m.value == pytest.approx(35.0 / (50.0 + merge.PRIOR_WEIGHT))
+
+    def test_google_alone_still_answers(self) -> None:
+        m = merge.combine_cells(None, merge.Cell(40.0, 50.0), self._cal())
+        assert m is not None and m.reddit is None and m.reddit_share == 0.0
+
+    def test_neither(self) -> None:
+        assert merge.combine_cells(None, None, self._cal()) is None
+
+    def test_an_all_neutral_cell_is_no_evidence(self) -> None:
+        m = merge.combine_cells(merge.Cell(0.0, 0.0), merge.Cell(30.0, 40.0), self._cal())
+        assert m is not None and m.reddit is None
+
+    def test_no_calibration_means_reddit_only(self) -> None:
+        m = merge.combine_cells(merge.Cell(30.0, 50.0), merge.Cell(30.0, 50.0), None)
+        assert m is not None and m.google is None
+
+    def test_a_real_disagreement_is_flagged(self) -> None:
+        m = merge.combine_cells(
+            merge.Cell(-45.0, 50.0), merge.Cell(48.0, 50.0), self._cal())
+        assert m is not None and m.conflicted
+
+    def test_the_calibrated_value_stays_on_the_scale(self) -> None:
+        """Sentiment is a weighted mean of values in [-1,+1]; an affine map
+        with slope 1.35 can carry -0.8 to -1.44, which is not a sentiment."""
+        cal = self._cal()
+        assert -1.0 <= cal.apply(-1.0) <= 1.0
+        assert -1.0 <= cal.apply(1.0) <= 1.0
+        m = merge.combine_cells(None, merge.Cell(-50.0, 50.0), cal)
+        assert m is not None and m.google is not None and m.google >= -1.0
+
+    def test_more_google_evidence_narrows_its_error_bar(self) -> None:
+        cal = self._cal()
+        thin = merge.calibrated(merge.Cell(3.0, 5.0), cal)[1]
+        fat = merge.calibrated(merge.Cell(600.0, 1000.0), cal)[1]
+        assert fat < thin
+
+    def test_the_calibration_residual_floors_google(self) -> None:
+        cal = self._cal()
+        _, var = merge.calibrated(merge.Cell(9e5, 1e6), cal)
+        assert var == pytest.approx(cal.residual_sd**2, rel=0.01)
+
+
 class TestCalibrationIsNotCircular:
     def test_a_per_store_offset_would_be_degenerate(self) -> None:
         """The reason the affine map is used instead of one offset per store.
