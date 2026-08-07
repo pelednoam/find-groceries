@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .jsonl import write_atomic
+from .locations import attach_branches
 
 # Evidence quotes per cell in the published payload. Three is what the UI
 # shows before "more"; the rest is weight the reader never sees.
@@ -134,7 +135,9 @@ def is_branch(name: str) -> bool:
     return not REGION_HINTS.match(name.strip().casefold())
 
 
-def build_payload(verdicts: Mapping[str, Any]) -> dict[str, Any]:
+def build_payload(
+    verdicts: Mapping[str, Any], locations: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Reshape the verdict document into the site payload."""
     stores = {s: slim_group(cats) for s, cats in verdicts["stores"].items()}
 
@@ -152,10 +155,33 @@ def build_payload(verdicts: Mapping[str, Any]) -> dict[str, Any]:
                 continue
             items.setdefault(store, {})[item] = slim_cell(cell, 2)
 
+    # Locations are optional: the site is useful without a map, and a failed
+    # Overpass call should degrade to no map rather than to no site.
+    places: list[dict[str, Any]] = []
+    attribution = ""
+    if locations:
+        raw = list(locations.get("places", []))
+        attribution = str(locations.get("attribution", ""))
+        linked = attach_branches(
+            raw, {store: list(b) for store, b in branches.items()}
+        )
+        for place in raw:
+            # A pin for a store nobody discusses is a pin with nothing behind
+            # it; the map exists to show where the evidence applies.
+            if place["store"] not in stores:
+                continue
+            entry = dict(place)
+            branch = linked.get(place["osm"])
+            if branch:
+                entry["branch"] = branch
+            places.append(entry)
+
     return {
         "generated_at": verdicts["generated_at"],
         "method": verdicts["method"],
         "corpus": verdicts["corpus"],
+        "places": places,
+        "places_attribution": attribution,
         "totals": {
             s: {
                 "n": t["n_claims"],

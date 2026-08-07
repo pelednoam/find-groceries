@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "none",
+    "outFile": "docs/app.js",
+
+    /* The TypeScript equivalent of `mypy --strict`. Every one of these is
+       on deliberately; `noUncheckedIndexedAccess` in particular is what
+       makes `DATA.stores[name]` a `| undefined` you have to handle, which
+       is exactly the class of bug the payload's optional fields invite. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "forceConsistentCasingInFileNames": true,
+    "useUnknownInCatchVariables": true,
+
+    "removeComments": false,
+    "newLine": "lf",
+    "types": ["leaflet"]
+  },
+  "include": ["docs/src/**/*.ts"]
+}

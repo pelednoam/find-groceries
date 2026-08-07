@@ -6,6 +6,7 @@
 <title>Where to buy groceries — Cambridge, MA</title>
 <meta name="description" content="Grocery store price and quality signals for Cambridge and Boston, aggregated from 9.6M Reddit posts and comments.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛒</text></svg>">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -21,6 +22,7 @@
 <nav class="wrap tabs" role="tablist">
   <button role="tab" data-view="list" class="on">Shopping list</button>
   <button role="tab" data-view="compare">Compare stores</button>
+  <button role="tab" data-view="map">Map</button>
   <button role="tab" data-view="store">Store detail</button>
   <button role="tab" data-view="items">Item search</button>
   <button role="tab" data-view="method">Method</button>
@@ -80,6 +82,24 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <!-- ── Map ───────────────────────────────────────────────────────── -->
+  <section id="view-map" class="view" hidden>
+    <div class="controls">
+      <label>Store <select id="map-store"><option value="">all stores</option></select></label>
+      <label>Colour by <select id="map-cat"><option value="">overall sentiment</option></select></label>
+      <label class="check"><input type="checkbox" id="map-evidence">
+        only branches with their own evidence</label>
+      <output id="map-count" class="muted"></output>
+    </div>
+    <div id="map"></div>
+    <p class="fineprint">
+      Pins are real store locations from OpenStreetMap, matched to a chain by
+      name. Colour is the verdict for the branch when this location could be
+      matched to one, and the chain otherwise — so two pins of the same chain
+      usually share a colour. <span id="map-attrib"></span>
+    </p>
   </section>
 
   <!-- ── Store detail ──────────────────────────────────────────────── -->
@@ -152,6 +172,7 @@
   <span id="footer-line"></span>
 </footer>
 
+<script src="vendor/leaflet/leaflet.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

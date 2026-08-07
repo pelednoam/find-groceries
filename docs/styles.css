@@ -182,3 +182,26 @@ details.cell[open] > summary::before { content: "▾"; }
 .fineprint { font-size: 0.85rem; color: var(--muted); margin-top: 26px; }
 
 footer { padding: 18px 20px 40px; color: var(--muted); font-size: 0.84rem; }
+
+/* ── map ──────────────────────────────────────────────────────────── */
+#map {
+  height: 540px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel);
+}
+@media (max-width: 640px) { #map { height: 400px; } }
+/* Leaflet ships light chrome; keep it legible on a dark page without
+   inverting the tiles themselves, which would make the map unreadable. */
+.leaflet-container { background: var(--panel); font: inherit; font-size: 0.9rem; }
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+  background: var(--panel); color: var(--ink);
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.25);
+}
+.leaflet-popup-content { margin: 12px 14px; }
+.leaflet-bar a, .leaflet-control-attribution {
+  background: var(--panel); color: var(--ink);
+}
+.leaflet-bar a:hover { background: var(--accent-soft); }
+.leaflet-control-attribution a { color: var(--accent); }
+.pin strong { display: block; font-size: 1rem; }
+.pin > div { margin-top: 2px; }
+.pin .linkish { margin-top: 8px; display: inline-block; }

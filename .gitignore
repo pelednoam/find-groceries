@@ -24,3 +24,6 @@ scripts/scrub_diff.py
 scripts/validate_review_results.py
 docs/ensemble_review_result_schema.json
 .claude/
+
+# Node toolchain for the site (TypeScript + jsdom). Regenerable.
+node_modules/

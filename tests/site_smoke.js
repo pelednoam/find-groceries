@@ -30,10 +30,34 @@ const dom = new JSDOM(fs.readFileSync(DOCS + "/index.html", "utf8"), {
   runScripts: "outside-only", virtualConsole: vc, url: "http://localhost:8177/",
 });
 const { window } = dom;
+installLeafletStub(window);
 const payload = fs.readFileSync(DOCS + "/verdicts.json", "utf8");
 window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(JSON.parse(payload)) });
 
 window.eval(fs.readFileSync(DOCS + "/app.js", "utf8"));
+
+/** Minimal Leaflet stand-in: jsdom has no layout, so the real library cannot
+ *  run. Records what the app asked for so the app's own logic is testable. */
+function installLeafletStub(w) {
+  const made = { maps: 0, tileUrls: [], markers: [] };
+  const layer = {
+    _items: [],
+    clearLayers() { made.markers.length = 0; },
+    addTo() { return this; },
+  };
+  w.L = {
+    made,
+    map() { made.maps += 1; return { setView() { return this; }, invalidateSize() {} }; },
+    tileLayer(url) { made.tileUrls.push(url); return { addTo() { return this; } }; },
+    layerGroup() { return layer; },
+    circleMarker(latlng, opts) {
+      const m = { latlng, opts, popup: null,
+        bindPopup(n) { this.popup = n; return this; },
+        addTo() { made.markers.push(this); return this; } };
+      return m;
+    },
+  };
+}
 
 setTimeout(() => {
   const d = window.document;
@@ -104,6 +128,35 @@ setTimeout(() => {
   $("#branch-pick").dispatchEvent(new window.Event("change"));
   ok($("#store-body h3").textContent.includes("Market Basket — Somerville"),
      "branch drill-down works", $("#store-body h3").textContent);
+
+  console.log("\n[map]");
+  click($('[data-view="map"]'));
+  ok(!$("#view-map").hidden, "map view shown");
+  const L = window.L;
+  ok(L.made.maps === 1, "one map created", L.made.maps);
+  ok(L.made.tileUrls.some((u) => u.includes("tile.openstreetmap.org")), "OSM tiles");
+  const total = Number($("#map-count").textContent.match(/of (\d+)/)[1]);
+  ok(L.made.markers.length === total, "a pin per location", `${L.made.markers.length}/${total}`);
+  ok(L.made.markers.every((m) => typeof m.opts.fillColor === "string"), "pins are coloured");
+  ok(L.made.markers.every((m) => m.popup && m.popup.nodeType === 1),
+     "popups are DOM nodes, not HTML strings");
+  ok($("#map-attrib").textContent.includes("OpenStreetMap"), "locations attributed");
+
+  const before = L.made.markers.length;
+  $("#map-store").value = "Market Basket";
+  $("#map-store").dispatchEvent(new window.Event("change"));
+  const mb = L.made.markers.length;
+  ok(mb > 0 && mb < before, "store filter narrows the map", `${before} -> ${mb}`);
+  $("#map-evidence").checked = true;
+  $("#map-evidence").dispatchEvent(new window.Event("change"));
+  ok(L.made.markers.length <= mb, "evidence filter narrows further", L.made.markers.length);
+  $("#map-store").value = "";
+  $("#map-evidence").checked = false;
+  $("#map-cat").value = "produce";
+  $("#map-cat").dispatchEvent(new window.Event("change"));
+  ok(L.made.markers.length > 0, "colour-by-category still renders pins", L.made.markers.length);
+  $("#map-cat").value = "";
+  $("#map-cat").dispatchEvent(new window.Event("change"));
 
   console.log("\n[item search]");
   click($('[data-view="items"]'));

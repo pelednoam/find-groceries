@@ -17,16 +17,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from groceries.paths import ROOT, VERDICTS  # noqa: E402
+from groceries.paths import DATA, ROOT, VERDICTS  # noqa: E402
 from groceries.site import build_payload, write_payload  # noqa: E402
 
 SITE_DATA = ROOT / "docs" / "verdicts.json"
+LOCATIONS = DATA / "locations.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verdicts", type=Path, default=VERDICTS)
     parser.add_argument("--out", type=Path, default=SITE_DATA)
+    parser.add_argument("--locations", type=Path, default=LOCATIONS)
     return parser
 
 
@@ -38,14 +40,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     verdicts = json.loads(args.verdicts.read_text(encoding="utf-8"))
-    payload = build_payload(verdicts)
+    locations = None
+    if args.locations.exists():
+        locations = json.loads(args.locations.read_text(encoding="utf-8"))
+    else:
+        # The site is useful without a map; say so rather than failing.
+        print(f"no {args.locations} — building without the map view.")
+        print("Run scripts/fetch_store_locations.py to add it.")
+    payload = build_payload(verdicts, locations)
     written = write_payload(payload, args.out)
 
     before = args.verdicts.stat().st_size
     print(f"{len(payload['stores'])} stores, "
           f"{sum(len(v) for v in payload['branches'].values())} branches, "
           f"{sum(len(v) for v in payload['regions'].values())} regions, "
-          f"{sum(len(v) for v in payload['items'].values())} items")
+          f"{sum(len(v) for v in payload['items'].values())} items, "
+          f"{len(payload['places'])} mapped locations "
+          f"({sum(1 for p in payload['places'] if p.get('branch'))} linked to a branch)")
     print(f"{before / 1e6:.1f}MB verdicts -> {written / 1e6:.1f}MB payload "
           f"({written / before:.0%})")
     print(f"wrote {args.out}")

@@ -55,6 +55,56 @@ def verdicts(**over: Any) -> dict[str, Any]:
     return base
 
 
+def locations(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "attribution": "© OpenStreetMap contributors (ODbL)",
+        "places": [
+            {"store": "Market Basket", "name": "Market Basket", "lat": 42.3875,
+             "lon": -71.0995, "address": "400 Somerville Ave", "city": "Somerville",
+             "osm": "node/1"},
+            {"store": "Market Basket", "name": "Market Basket", "lat": 42.4710,
+             "lon": -71.2085, "address": "43 Middlesex Turnpike", "city": "Burlington",
+             "osm": "node/2"},
+            {"store": "Nowhere Grocers", "name": "Nowhere", "lat": 42.0, "lon": -71.0,
+             "address": "", "city": "", "osm": "node/3"},
+        ],
+    }
+    base.update(over)
+    return base
+
+
+class TestLocationsInPayload:
+    def test_places_are_carried_through(self) -> None:
+        payload = site.build_payload(verdicts(), locations())
+        assert [p["osm"] for p in payload["places"]] == ["node/1", "node/2"]
+
+    def test_a_store_nobody_discusses_gets_no_pin(self) -> None:
+        """A pin with no evidence behind it is a pin the map cannot explain."""
+        payload = site.build_payload(verdicts(), locations())
+        assert all(p["store"] in payload["stores"] for p in payload["places"])
+
+    def test_a_pin_is_linked_to_a_branch_that_has_evidence(self) -> None:
+        payload = site.build_payload(verdicts(), locations())
+        by_osm = {p["osm"]: p for p in payload["places"]}
+        assert by_osm["node/1"]["branch"] == "Somerville"
+
+    def test_a_pin_with_no_matching_branch_is_left_unlinked(self) -> None:
+        # Burlington has no branch-level evidence in the fixture, so the pin
+        # falls back to the chain rather than borrowing another branch's score.
+        payload = site.build_payload(verdicts(), locations())
+        by_osm = {p["osm"]: p for p in payload["places"]}
+        assert "branch" not in by_osm["node/2"]
+
+    def test_attribution_survives(self) -> None:
+        payload = site.build_payload(verdicts(), locations())
+        assert "OpenStreetMap" in payload["places_attribution"]
+
+    def test_no_locations_means_no_map_not_no_site(self) -> None:
+        payload = site.build_payload(verdicts(), None)
+        assert payload["places"] == [] and payload["places_attribution"] == ""
+        assert payload["stores"], "the rest of the site must still build"
+
+
 class TestSlimCell:
     def test_keeps_the_numbers_the_ui_shows(self) -> None:
         got = site.slim_cell(cell())
@@ -181,6 +231,52 @@ class TestWrite:
         site.write_payload(site.build_payload(v), out)
         assert json.loads(out.read_text(encoding="utf-8"))[
             "stores"]["Market Basket"]["produce"]["e"][0]["t"] == "café — 5€"
+
+
+class TestPayloadContract:
+    """The TypeScript `Payload` interface must describe what Python emits.
+
+    These are two hand-written descriptions of one wire format in two
+    languages, and nothing else connects them. A field renamed on the Python
+    side would otherwise surface as a blank panel in the browser rather than
+    as an error anywhere — tsc cannot see the Python, and mypy cannot see the
+    TypeScript.
+    """
+
+    @pytest.fixture
+    def declared(self) -> set[str]:
+        src = (Path(__file__).resolve().parent.parent
+               / "docs" / "src" / "types.ts").read_text(encoding="utf-8")
+        body = src.split("interface Payload {", 1)[1].split("\n}", 1)[0]
+        fields = set()
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("/", "*")):
+                continue
+            fields.add(line.split(":", 1)[0].rstrip("?"))
+        return fields
+
+    def test_typescript_declares_every_python_field(self, declared: set[str]) -> None:
+        emitted = set(site.build_payload(verdicts(), locations()))
+        assert emitted - declared == set(), "Python emits fields TypeScript does not declare"
+
+    def test_python_emits_every_typescript_field(self, declared: set[str]) -> None:
+        emitted = set(site.build_payload(verdicts(), locations()))
+        assert declared - emitted == set(), "TypeScript declares fields Python does not emit"
+
+    def test_the_place_shape_matches_too(self, declared: set[str]) -> None:
+        src = (Path(__file__).resolve().parent.parent
+               / "docs" / "src" / "types.ts").read_text(encoding="utf-8")
+        body = src.split("interface Place {", 1)[1].split("\n}", 1)[0]
+        ts_fields = {
+            line.strip().split(":", 1)[0].rstrip("?")
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith(("/", "*"))
+        }
+        built = site.build_payload(verdicts(), locations())["places"]
+        assert built, "fixture should produce at least one place"
+        for place in built:
+            assert set(place) <= ts_fields, set(place) - ts_fields
 
 
 class TestPublishedPayload:
