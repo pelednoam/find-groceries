@@ -14,7 +14,9 @@ is free.
 from __future__ import annotations
 
 import json
+import math
 import re
+from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -156,28 +158,41 @@ def _merge_block(
     # Fit on the decayed values, because those are what `combine` will feed
     # back in. Fitting on all-time means and applying to recent ones would
     # put a systematic tilt through every merged number.
-    pairs = [
-        (_google_norm(r), float(totals[store]["sentiment"]))
-        for store, r in ratings.items()
+    # Fit against the raw Reddit mean, since that is what `combine` uses.
+    fittable = [
+        (store, r) for store, r in ratings.items()
         if store in totals and _usable(r) and not r.get("thin", False)
     ]
-    cal = fit_calibration(pairs)
+    pairs = [(_google_norm(r), _raw_mean(totals[store])) for store, r in fittable]
+    # Weighted by Reddit precision, so a store with 1.9 units of evidence
+    # cannot tilt the line against one with 2,290.
+    weights = [_evidence(totals[store])[1] for store, _ in fittable]
+    cal = fit_calibration(pairs, weights)
     if cal is None:
         return None
 
     stores: dict[str, Any] = {}
     for store, t in totals.items():
         rating = ratings.get(store)
+        score, vw = _evidence(t)
         m = combine(
-            float(t["sentiment"]), float(t["weighted_evidence"]),
+            score, vw,
             rating if rating is not None and _usable(rating) else None, cal,
         )
         if m is not None:
             stores[store] = m.as_dict()
 
-    branches = _merge_branches(verdicts, crosscheck, places, cal)
+    # The line is fitted at chain level, where the targets are known well
+    # (median valenced weight 249 vs 2.6, R² 0.76 vs 0.48). Using it at
+    # branch level costs +0.005 RMSE, so the line transfers — but the
+    # *residual* does not: predictions at branch level are wider, and the
+    # residual is what floors Google's precision in `combine`. Measure it
+    # where it will be used rather than inheriting the chain's.
+    branch_cal = _branch_calibration(verdicts, crosscheck, places, cal)
+    branches = _merge_branches(verdicts, crosscheck, places, branch_cal)
     return {
         "calibration": cal.as_dict(),
+        "branch_calibration": branch_cal.as_dict(),
         "stores": stores,
         "branches": branches,
         "note": (
@@ -185,6 +200,54 @@ def _merge_block(
             "to the overall verdict only, never to a category."
         ),
     }
+
+
+def _branch_calibration(
+    verdicts: Mapping[str, Any],
+    crosscheck: Mapping[str, Any],
+    places: Sequence[Mapping[str, Any]],
+    cal: Calibration,
+) -> Calibration:
+    """The chain line, with an error bar measured at branch level."""
+    # Below this, the "measured" residual is a handful of individual
+    # disagreements rather than a spread — with one branch it is that
+    # branch's own error, which then discounts the very source it was
+    # derived from. Fall back to the chain figure.
+    min_points = 10
+    errors: list[tuple[float, float]] = []
+    for (store, branch), rating in _pooled_branches(crosscheck, places).items():
+        t = verdicts.get("branch_totals", {}).get(store, {}).get(branch)
+        if t is None:
+            continue
+        score, vw = _evidence(t)
+        if score is None or vw <= 0:
+            continue
+        errors.append((score / vw - cal.apply(_google_norm(rating)), vw))
+    total = sum(w for _, w in errors)
+    if len(errors) < min_points or total <= 0:
+        return cal
+    rmse = math.sqrt(sum(w * e * e for e, w in errors) / total)
+    # Never claim to be more precise at branch level than at chain level.
+    return replace(cal, residual_sd=max(rmse, cal.residual_sd))
+
+
+def _pooled_branches(
+    crosscheck: Mapping[str, Any], places: Sequence[Mapping[str, Any]]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Every pin's rating, pooled onto the branch it serves."""
+    by_osm: Mapping[str, Any] = crosscheck["locations"]
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for place in places:
+        branch = place.get("branch")
+        rating = by_osm.get(place["osm"])
+        if branch and rating and _usable(rating):
+            grouped.setdefault((place["store"], branch), []).append(rating)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, ratings in grouped.items():
+        pooled = _pool(ratings)
+        if pooled is not None:
+            out[key] = pooled
+    return out
 
 
 def _merge_branches(
@@ -198,14 +261,7 @@ def _merge_branches(
     This is where the combination earns its keep: only 26% of Reddit claims
     name a branch, while Google has ratings for almost every location.
     """
-    by_osm: Mapping[str, Any] = crosscheck["locations"]
-    # A branch can have more than one pin; pool their ratings by count.
-    pooled: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
-    for place in places:
-        branch = place.get("branch")
-        rating = by_osm.get(place["osm"])
-        if branch and rating and _usable(rating):
-            pooled.setdefault((place["store"], branch), []).append(rating)
+    pooled = _pooled_branches(crosscheck, places)
 
     out: dict[str, dict[str, Any]] = {}
     branch_totals: Mapping[str, Mapping[str, Any]] = verdicts.get("branch_totals", {})
@@ -213,26 +269,47 @@ def _merge_branches(
     for store, by_branch in branch_totals.items():
         for branch, t in by_branch.items():
             seen.add((store, branch))
-            m = combine(
-                float(t["sentiment"]), float(t["weighted_evidence"]),
-                _pool(pooled.get((store, branch), [])), cal,
-            )
+            score, vw = _evidence(t)
+            m = combine(score, vw, pooled.get((store, branch)), cal)
             if m is not None:
                 out.setdefault(store, {})[branch] = m.as_dict()
     # Branches with a rating but no Reddit evidence at all are still worth
     # showing: "nobody on Reddit discussed this one, Google says 4.3".
-    for (store, branch), ratings in pooled.items():
+    for (store, branch), rating in pooled.items():
         if (store, branch) in seen:
             continue
-        m = combine(None, 0.0, _pool(ratings), cal)
+        m = combine(None, 0.0, rating, cal)
         if m is not None:
             out.setdefault(store, {})[branch] = m.as_dict()
     return out
 
 
+def _raw_mean(totals: Mapping[str, Any]) -> float:
+    """The weighted mean before stage 3's pull toward neutral."""
+    score, vw = _evidence(totals)
+    return score / vw if score is not None and vw > 0 else float(totals["sentiment"])
+
+
 def _google_norm(rating: Mapping[str, Any]) -> float:
     """The recency-decayed value, falling back to the all-time one."""
     return float(rating.get("norm_recent", rating["norm"]))
+
+
+def _evidence(totals: Mapping[str, Any]) -> tuple[float | None, float]:
+    """Stage 3's raw (score, valenced_weight) for a store or branch.
+
+    Older verdict files predate both fields. Rather than fail, invert the
+    published sentiment — `sentiment = score / (vw + k)` — using weighted
+    evidence as a stand-in for valenced weight. Approximate, and only ever
+    reached by a stale file.
+    """
+    if "score" in totals and "valenced_weight" in totals:
+        vw = float(totals["valenced_weight"])
+        return (float(totals["score"]) if vw > 0 else None), vw
+    vw = float(totals.get("weighted_evidence", 0.0))
+    if vw <= 0:
+        return None, 0.0
+    return float(totals["sentiment"]) * (vw + 2.0), vw
 
 
 def _usable(rating: Mapping[str, Any]) -> bool:

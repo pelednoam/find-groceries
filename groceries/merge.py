@@ -20,6 +20,17 @@ affine map still corrects every store by a different amount, because the
 amount depends on where the store sits; it just spends two degrees of
 freedom doing it instead of twenty.
 
+**One prior, applied once.** Stage 3 publishes `sentiment = score / (vw + k)`
+— already pulled toward neutral, hardest where evidence is thinnest. Feeding
+that damped number into an inverse-variance combination against an undamped
+Google value penalises thin evidence twice, and does it worst exactly where
+the merge is supposed to help: measured across the 83 merged branches it
+biased the result by up to 0.20. So `combine` works from the *raw* weighted
+mean `score / vw` and applies the pull once, to the combined estimate, using
+the combined precision. With Google absent the arithmetic collapses back to
+`score / (vw + k)` — the merge is a strict generalisation of the shrinkage
+stage 3 already does, not a second helping of it.
+
 **Where the merge actually earns its keep.** Not at chain level: Reddit has
 thousands of claims per chain and the combination barely moves. At *branch*
 level only 26% of Reddit claims name a branch at all, while Google has 20+
@@ -32,7 +43,6 @@ wins wherever it is well evidenced and loses where it is thin.
 from __future__ import annotations
 
 import math
-import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -41,8 +51,9 @@ from typing import Any, Final
 # +-1 with some neutrals, so ~1.0; it sets the scale of Reddit's error bar,
 # not its centre.
 CLAIM_SPREAD: Final = 1.0
-# Matches the shrinkage in stage 3, so a cell with no evidence has a wide
-# error bar rather than an undefined one.
+# The pull toward neutral, applied once to the *combination*. Same constant
+# as stage 3's, so that with Google absent this reduces to exactly the
+# sentiment stage 3 already publishes — see `combine`.
 PRIOR_WEIGHT: Final = 2.0
 # Below this many ratings a Google mean is a mood, not a measurement.
 MIN_GOOGLE_RATINGS: Final = 20
@@ -78,17 +89,35 @@ class Calibration:
         }
 
 
-def _ols(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float]:
-    mx, my = statistics.fmean(xs), statistics.fmean(ys)
-    denom = sum((x - mx) ** 2 for x in xs)
+def _ols(
+    xs: Sequence[float], ys: Sequence[float], ws: Sequence[float]
+) -> tuple[float, float]:
+    """Weighted least squares."""
+    total = sum(ws)
+    if total <= 0:
+        return 0.0, 0.0
+    mx = sum(x * w for x, w in zip(xs, ws, strict=True)) / total
+    my = sum(y * w for y, w in zip(ys, ws, strict=True)) / total
+    denom = sum(w * (x - mx) ** 2 for x, w in zip(xs, ws, strict=True))
     if denom == 0:
         return my, 0.0
-    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom
+    slope = sum(
+        w * (x - mx) * (y - my) for x, y, w in zip(xs, ys, ws, strict=True)
+    ) / denom
     return my - slope * mx, slope
 
 
-def fit_calibration(pairs: Sequence[tuple[float, float]]) -> Calibration | None:
-    """Fit google -> reddit from (google_norm, reddit_sentiment) pairs.
+def fit_calibration(
+    pairs: Sequence[tuple[float, float]],
+    weights: Sequence[float] | None = None,
+) -> Calibration | None:
+    """Fit google -> reddit from (google_norm, reddit_mean) pairs.
+
+    `weights` should be each store's Reddit precision. Without them one
+    barely-evidenced store swings the line: Broadway Marketplace has a
+    valenced weight of 1.9 against Market Basket's 2,290, and unweighted it
+    moved the slope from 2.80 to 3.05 on its own. The same effect is larger
+    at branch level, where unweighted gives 1.75 and weighted 2.85.
 
     None below four points: two parameters need degrees of freedom to spare,
     and a line through three points says nothing about the fourth.
@@ -97,33 +126,45 @@ def fit_calibration(pairs: Sequence[tuple[float, float]]) -> Calibration | None:
         return None
     goo = [p[0] for p in pairs]
     red = [p[1] for p in pairs]
-    intercept, slope = _ols(goo, red)
+    ws = list(weights) if weights is not None else [1.0] * len(pairs)
+    if len(ws) != len(pairs) or sum(ws) <= 0:
+        return None
+    intercept, slope = _ols(goo, red, ws)
     resid = [r - (intercept + slope * g) for g, r in zip(goo, red, strict=True)]
 
     # Leave-one-out, so the reported error is out-of-sample.
     loo: list[float] = []
     for i in range(len(pairs)):
-        xs = [goo[j] for j in range(len(pairs)) if j != i]
-        ys = [red[j] for j in range(len(pairs)) if j != i]
-        a, b = _ols(xs, ys)
+        keep = [j for j in range(len(pairs)) if j != i]
+        a, b = _ols([goo[j] for j in keep], [red[j] for j in keep],
+                    [ws[j] for j in keep])
         loo.append(red[i] - (a + b * goo[i]))
 
-    var_red = statistics.pvariance(red)
-    var_res = statistics.pvariance(resid)
+    total = sum(ws)
+    wmean = sum(r * w for r, w in zip(red, ws, strict=True)) / total
+    var_red = sum(w * (r - wmean) ** 2 for r, w in zip(red, ws, strict=True)) / total
+    var_res = sum(w * e**2 for e, w in zip(resid, ws, strict=True)) / total
+    # Weighted too: the error that matters is the error at stores whose true
+    # value is actually known.
+    loo_mse = sum(w * e**2 for e, w in zip(loo, ws, strict=True)) / total
     return Calibration(
         intercept=intercept,
         slope=slope,
         # The honest error bar is the out-of-sample one.
-        residual_sd=statistics.pstdev(loo),
+        residual_sd=math.sqrt(loo_mse),
         n_stores=len(pairs),
         r2=(1.0 - var_res / var_red) if var_red else 0.0,
-        loo_rmse=math.sqrt(statistics.fmean([e * e for e in loo])),
+        loo_rmse=math.sqrt(loo_mse),
     )
 
 
-def reddit_variance(weight: float) -> float:
-    """Squared standard error of a Reddit cell, from its weighted evidence."""
-    return (CLAIM_SPREAD**2) / max(weight + PRIOR_WEIGHT, 1e-9)
+def reddit_variance(valenced_weight: float) -> float:
+    """Squared standard error of the *raw* Reddit mean.
+
+    No prior term: the pull toward neutral is applied to the combination in
+    `combine`, so including it here would apply it twice.
+    """
+    return (CLAIM_SPREAD**2) / max(valenced_weight, 1e-9)
 
 
 def google_variance(rating: Mapping[str, Any], cal: Calibration) -> float:
@@ -174,40 +215,60 @@ class Merged:
 
 
 def combine(
-    reddit: float | None,
-    reddit_weight: float,
+    score: float | None,
+    valenced_weight: float,
     rating: Mapping[str, Any] | None,
     cal: Calibration | None,
 ) -> Merged | None:
-    """Inverse-variance combination of whichever sources are present."""
+    """Combine whichever sources are present, then shrink once.
+
+    `score` and `valenced_weight` are stage 3's raw ingredients, not its
+    published `sentiment`: the raw mean is `score / valenced_weight`, and the
+    pull toward neutral is applied at the end so it lands on the combination
+    rather than on one input.
+    """
+    have_reddit = score is not None and valenced_weight > 0
     have_google = (
         rating is not None
         and cal is not None
         and float(rating.get("n_eff", rating["n"])) >= MIN_GOOGLE_RATINGS
     )
-    if reddit is None and not have_google:
+    if not have_reddit and not have_google:
         return None
 
+    precision = 0.0
+    weighted_sum = 0.0
+    r_value: float | None = None
+    g_value: float | None = None
+    r_var = g_var = math.inf
+
+    if have_reddit:
+        assert score is not None
+        r_value = score / valenced_weight
+        r_var = reddit_variance(valenced_weight)
+        precision += 1.0 / r_var
+        weighted_sum += r_value / r_var
     if have_google:
-        assert rating is not None and cal is not None  # narrowed above
+        assert rating is not None and cal is not None
         # The decayed value where it exists: recency should move the number
         # as well as the confidence, even though on this corpus it barely does.
         g_value = cal.apply(float(rating.get("norm_recent", rating["norm"])))
         g_var = google_variance(rating, cal)
-    else:
-        g_value = g_var = 0.0
+        precision += 1.0 / g_var
+        weighted_sum += g_value / g_var
 
-    if reddit is None:
-        return Merged(g_value, math.sqrt(g_var), None, g_value, 0.0, 0.0, False)
-    r_var = reddit_variance(reddit_weight)
-    if not have_google:
-        return Merged(reddit, math.sqrt(r_var), reddit, None, 1.0, 0.0, False)
+    raw = weighted_sum / precision
+    # The one prior. With Google absent this is score/(vw + k) exactly.
+    shrunk = raw * precision / (precision + PRIOR_WEIGHT)
+    se = math.sqrt(1.0 / (precision + PRIOR_WEIGHT))
+    share = (1.0 / r_var) / precision if have_reddit else 0.0
 
-    wr, wg = 1.0 / r_var, 1.0 / g_var
-    value = (reddit * wr + g_value * wg) / (wr + wg)
-    se = math.sqrt(1.0 / (wr + wg))
-    gap = g_value - reddit
-    # Conflict is measured against the *inputs'* spread, not the combined
-    # error bar, which is by construction smaller than either.
-    conflicted = abs(gap) > DISAGREEMENT_SIGMAS * math.sqrt(r_var + g_var)
-    return Merged(value, se, reddit, g_value, wr / (wr + wg), gap, conflicted)
+    gap = 0.0
+    conflicted = False
+    if have_reddit and have_google:
+        assert r_value is not None and g_value is not None
+        gap = g_value - r_value
+        # Measured against the inputs' own spread, not the combined error
+        # bar, which is by construction smaller than either.
+        conflicted = abs(gap) > DISAGREEMENT_SIGMAS * math.sqrt(r_var + g_var)
+    return Merged(shrunk, se, r_value, g_value, share, gap, conflicted)

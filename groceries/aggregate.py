@@ -625,6 +625,11 @@ def aggregate(
             "n_claims": t.n,
             "weighted_evidence": round(t.weight, 2),
             "sentiment": round(t.sentiment(), 3),
+            # The un-shrunk ingredients. `sentiment` is score/(vw + k); a
+            # consumer combining it with another source needs the estimate
+            # before the prior was applied, or the prior gets counted twice.
+            "score": round(t.score, 4),
+            "valenced_weight": round(t.valenced_weight, 4),
         }
 
     item_index: dict[str, dict[str, Any]] = {}
@@ -661,6 +666,8 @@ def aggregate(
                 "n_claims": t.n,
                 "weighted_evidence": round(t.weight, 2),
                 "sentiment": round(t.sentiment(), 3),
+                "score": round(t.score, 4),
+                "valenced_weight": round(t.valenced_weight, 4),
                 # A store whose every cell was suppressed has no viewable
                 # evidence; saying so beats printing a confident number.
                 "insufficient_evidence": store not in stores,

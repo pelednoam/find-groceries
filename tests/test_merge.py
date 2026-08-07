@@ -69,6 +69,30 @@ class TestFitCalibration:
         assert cal is not None
         assert cal.apply(0.5) == pytest.approx(0.0, abs=1e-9)
 
+    def test_weights_stop_one_thin_store_tilting_the_line(self) -> None:
+        """Broadway Marketplace has 1.9 units of evidence against Market
+        Basket's 2,290; unweighted it moved the real slope 2.80 -> 3.05."""
+        pairs = line(2.8, -1.7, n=10) + [(0.9, -3.0)]   # one wild outlier
+        heavy = [100.0] * 10 + [0.01]
+        loose = merge.fit_calibration(pairs)
+        tight = merge.fit_calibration(pairs, heavy)
+        assert loose is not None and tight is not None
+        assert abs(tight.slope - 2.8) < abs(loose.slope - 2.8)
+        assert tight.slope == pytest.approx(2.8, abs=0.05)
+
+    def test_one_weighted_point_does_not_crash_the_leave_one_out(self) -> None:
+        """Dropping the only point with weight leaves nothing to fit; the
+        fold has to return something rather than divide by zero."""
+        pairs = line(2.8, -1.7, n=5)
+        cal = merge.fit_calibration(pairs, [1.0] + [0.0] * 4)
+        assert cal is not None and math.isfinite(cal.loo_rmse)
+
+    def test_zero_total_weight_is_refused(self) -> None:
+        assert merge.fit_calibration(line(2.8, -1.7), [0.0] * 20) is None
+
+    def test_mismatched_weights_are_refused(self) -> None:
+        assert merge.fit_calibration(line(2.8, -1.7), [1.0, 1.0]) is None
+
     def test_serialises_for_the_site(self) -> None:
         cal = merge.fit_calibration(line(2.8, -1.7))
         assert cal is not None
@@ -81,7 +105,7 @@ class TestFitCalibration:
 class TestVariance:
     def test_more_evidence_narrows_the_reddit_error_bar(self) -> None:
         assert merge.reddit_variance(1000) < merge.reddit_variance(10)
-        assert merge.reddit_variance(10) < merge.reddit_variance(0)
+        assert merge.reddit_variance(10) < merge.reddit_variance(1)
 
     def test_no_evidence_is_wide_not_undefined(self) -> None:
         assert 0 < merge.reddit_variance(0) < math.inf
@@ -111,13 +135,14 @@ class TestCombine:
         return cal
 
     def test_well_evidenced_reddit_keeps_the_weight(self) -> None:
-        m = merge.combine(0.63, 2573.0, rating(n=19_764, norm=0.73), self._cal())
+        # score/valenced_weight = 0.63
+        m = merge.combine(1620.0, 2573.0, rating(n=19_764, norm=0.73), self._cal())
         assert m is not None
         assert m.reddit_share > 0.95
         assert m.value == pytest.approx(0.63, abs=0.02)
 
     def test_a_thin_branch_lets_google_lead(self) -> None:
-        m = merge.combine(-0.21, 0.5, rating(n=800, norm=0.79), self._cal())
+        m = merge.combine(-0.105, 0.5, rating(n=800, norm=0.79), self._cal())
         assert m is not None
         assert m.reddit_share < 0.3
         assert m.value > 0.0, "the combination should move off the single claim"
@@ -125,15 +150,26 @@ class TestCombine:
     def test_the_share_moves_monotonically_with_evidence(self) -> None:
         cal = self._cal()
         shares = [
-            merge.combine(0.2, w, rating(), cal).reddit_share  # type: ignore[union-attr]
+            merge.combine(0.2 * w, w, rating(), cal).reddit_share  # type: ignore[union-attr]
             for w in (0.5, 5, 50, 500, 5000)
         ]
         assert shares == sorted(shares)
 
-    def test_reddit_alone(self) -> None:
-        m = merge.combine(0.4, 100.0, None, self._cal())
+    def test_reddit_alone_reproduces_stage_three_exactly(self) -> None:
+        """The load-bearing invariant. With no second source the combination
+        must be the shrunk mean stage 3 already publishes — otherwise the
+        merge is applying the neutral prior a second time."""
+        score, vw = 40.0, 100.0
+        m = merge.combine(score, vw, None, self._cal())
         assert m is not None
-        assert m.reddit_share == 1.0 and m.value == 0.4 and m.google is None
+        assert m.reddit_share == 1.0 and m.google is None
+        assert m.value == pytest.approx(score / (vw + merge.PRIOR_WEIGHT))
+
+    @pytest.mark.parametrize("vw", [0.4, 2.0, 25.0, 400.0, 5000.0])
+    def test_the_reduction_holds_at_every_evidence_level(self, vw: float) -> None:
+        m = merge.combine(0.7 * vw, vw, None, self._cal())
+        assert m is not None
+        assert m.value == pytest.approx(0.7 * vw / (vw + merge.PRIOR_WEIGHT))
 
     def test_google_alone(self) -> None:
         """A branch nobody on Reddit mentioned still has an answer."""
@@ -144,50 +180,60 @@ class TestCombine:
     def test_neither_source(self) -> None:
         assert merge.combine(None, 0.0, None, self._cal()) is None
 
+    def test_an_all_neutral_cell_counts_as_no_reddit_evidence(self) -> None:
+        """valenced_weight 0 means every claim was neutral: there is no mean
+        to take, and dividing by it would be a crash or a lie."""
+        m = merge.combine(0.0, 0.0, rating(n=300), self._cal())
+        assert m is not None and m.reddit is None
+
     def test_too_few_ratings_are_ignored(self) -> None:
-        m = merge.combine(0.4, 10.0, rating(n=merge.MIN_GOOGLE_RATINGS - 1), self._cal())
+        m = merge.combine(4.0, 10.0, rating(n=merge.MIN_GOOGLE_RATINGS - 1), self._cal())
         assert m is not None and m.google is None and m.reddit_share == 1.0
 
     def test_no_calibration_means_reddit_only(self) -> None:
-        m = merge.combine(0.4, 10.0, rating(), None)
+        m = merge.combine(4.0, 10.0, rating(), None)
         assert m is not None and m.google is None
 
     def test_the_combination_lies_between_its_inputs(self) -> None:
+        """Shrinkage can pull it toward zero, so the bound is the wider of
+        [inputs] and [0, inputs]."""
         cal = self._cal()
         for w in (0.5, 5.0, 500.0):
-            m = merge.combine(-0.5, w, rating(n=1000, norm=0.85), cal)
+            m = merge.combine(-0.5 * w, w, rating(n=1000, norm=0.85), cal)
             assert m is not None
-            lo, hi = sorted([m.reddit or 0, m.google or 0])
+            lo = min(m.reddit or 0.0, m.google or 0.0, 0.0)
+            hi = max(m.reddit or 0.0, m.google or 0.0, 0.0)
             assert lo - 1e-9 <= m.value <= hi + 1e-9
 
     def test_combining_never_widens_the_error_bar(self) -> None:
         cal = self._cal()
-        m = merge.combine(0.2, 20.0, rating(n=500), cal)
-        assert m is not None
-        assert m.se < math.sqrt(merge.reddit_variance(20.0))
+        m = merge.combine(4.0, 20.0, rating(n=500), cal)
+        alone = merge.combine(4.0, 20.0, None, cal)
+        assert m is not None and alone is not None
+        assert m.se < alone.se
 
     def test_a_real_conflict_is_flagged_not_hidden(self) -> None:
         """Averaging is only honest when the inputs are compatible. When they
         are not, the number stays but the reader is told."""
         cal = self._cal()
-        m = merge.combine(-0.6, 400.0, rating(n=5000, norm=0.9), cal)
+        m = merge.combine(-240.0, 400.0, rating(n=5000, norm=0.9), cal)
         assert m is not None and m.conflicted
 
     def test_agreement_is_not_flagged(self) -> None:
         cal = self._cal()
         agreeing = cal.apply(0.7)
-        m = merge.combine(agreeing, 400.0, rating(n=5000, norm=0.7), cal)
+        m = merge.combine(agreeing * 400.0, 400.0, rating(n=5000, norm=0.7), cal)
         assert m is not None and not m.conflicted
 
     def test_serialises_with_both_inputs_visible(self) -> None:
         """A merged number that hides its sources cannot be argued with."""
-        m = merge.combine(0.3, 50.0, rating(), self._cal())
+        m = merge.combine(15.0, 50.0, rating(), self._cal())
         assert m is not None
         d = m.as_dict()
         assert {"v", "se", "share", "gap", "conflict", "r", "g"} == set(d)
 
     def test_absent_inputs_are_omitted_not_zeroed(self) -> None:
-        d = merge.combine(0.3, 50.0, None, self._cal()).as_dict()  # type: ignore[union-attr]
+        d = merge.combine(15.0, 50.0, None, self._cal()).as_dict()  # type: ignore[union-attr]
         assert "g" not in d and d["r"] == 0.3
 
 

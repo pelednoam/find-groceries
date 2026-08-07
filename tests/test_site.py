@@ -129,7 +129,9 @@ class TestMergeInPayload:
         v = verdicts()
         v["store_totals"] = {
             f"S{i}": {"n_claims": 100, "weighted_evidence": 40.0,
-                      "sentiment": -0.5 + 0.15 * i, "insufficient_evidence": False}
+                      "sentiment": -0.5 + 0.15 * i,
+                      "score": (-0.5 + 0.15 * i) * 40.0, "valenced_weight": 40.0,
+                      "insufficient_evidence": False}
             for i in range(8)
         }
         v["stores"] = {f"S{i}": {"produce": cell()} for i in range(8)}
@@ -160,6 +162,41 @@ class TestMergeInPayload:
         payload = site.build_payload(self._verdicts(), None, self._cc())
         assert payload["totals"]["S0"]["s"] == -0.5
 
+    def test_a_store_with_no_google_reproduces_stage_three(self) -> None:
+        """The invariant that keeps the merge from double-counting the prior:
+        one source in, stage 3's own arithmetic out."""
+        from groceries.merge import PRIOR_WEIGHT
+
+        v = self._verdicts()
+        cc = self._cc()
+        del cc["stores"]["S3"]
+        merged = site.build_payload(v, None, cc)["merged"]
+        t = v["store_totals"]["S3"]
+        assert merged["stores"]["S3"]["v"] == pytest.approx(
+            t["score"] / (t["valenced_weight"] + PRIOR_WEIGHT), abs=0.001
+        )
+
+    def test_the_branch_error_bar_is_measured_where_it_is_used(self) -> None:
+        """The line transfers from chain to branch; the residual does not.
+
+        On the real corpus the chain residual is 0.27 and the branch one
+        0.34, so a branch merge that inherited the chain figure would give
+        Google more weight than its accuracy there deserves.
+        """
+        v, cc, loc = self._with_branches()
+        merged = site.build_payload(v, loc, cc)["merged"]
+        assert merged["branch_calibration"]["slope"] == merged["calibration"]["slope"]
+        assert (merged["branch_calibration"]["residual_sd"]
+                >= merged["calibration"]["residual_sd"])
+
+    def test_a_residual_measured_on_too_few_branches_is_not_trusted(self) -> None:
+        """With one branch the "measured" residual is that branch's own
+        disagreement, which would then discount the source it came from."""
+        v, cc, loc = self._with_branches()
+        merged = site.build_payload(v, loc, cc)["merged"]
+        assert (merged["branch_calibration"]["residual_sd"]
+                == merged["calibration"]["residual_sd"]), "should fall back"
+
     def test_a_malformed_rating_degrades_rather_than_raising(self) -> None:
         """The cross-check is a separately generated file; one written by an
         older version must mean "no Google here", not a build failure."""
@@ -172,7 +209,8 @@ class TestMergeInPayload:
         v = self._verdicts()
         v["branches"] = {"S0": {"Somerville": {"produce": cell()}}}
         v["branch_totals"] = {"S0": {"Somerville": {
-            "n_claims": 2, "weighted_evidence": 0.6, "sentiment": -0.4}}}
+            "n_claims": 2, "weighted_evidence": 0.6, "sentiment": -0.4,
+            "score": -0.24, "valenced_weight": 0.6}}}
         cc = self._cc()
         cc["locations"] = {"node/1": {"n": 400, "norm": 0.8},
                            "node/2": {"n": 200, "norm": 0.6}}
@@ -191,8 +229,9 @@ class TestMergeInPayload:
         merged = site.build_payload(v, loc, cc)["merged"]
         b = merged["branches"]["S0"]["Somerville"]
         assert b["r"] == -0.4 and b["g"] is not None
-        # pooled norm = (400*0.8 + 200*0.6)/600 = 0.733
-        assert b["share"] < 0.5, "a 0.6-weight branch should not outvote 600 ratings"
+        # pooled norm = (400*0.8 + 200*0.6)/600 = 0.733, so both pins counted
+        assert b["g"] == pytest.approx(-4.25 + 7.5 * 0.7333, abs=0.01)
+        assert b["share"] < 0.1, "0.6 units of evidence must not outvote 600 ratings"
 
     def test_a_branch_with_no_reddit_claims_still_gets_an_answer(self) -> None:
         v, cc, loc = self._with_branches()
@@ -212,6 +251,42 @@ class TestMergeInPayload:
     def test_the_merge_note_states_its_own_scope(self) -> None:
         v, cc, loc = self._with_branches()
         assert "category" in site.build_payload(v, loc, cc)["merged"]["note"]
+
+    def test_an_older_verdict_file_without_the_raw_fields_still_merges(self) -> None:
+        """`score`/`valenced_weight` postdate the merge; a stale file must
+        degrade to an approximation rather than to no output."""
+        v = self._verdicts()
+        for t in v["store_totals"].values():
+            del t["score"], t["valenced_weight"]
+        merged = site.build_payload(v, None, self._cc())["merged"]
+        assert merged is not None and len(merged["stores"]) == 8
+
+    def test_a_cell_with_no_valenced_claims_has_no_reddit_side(self) -> None:
+        v = self._verdicts()
+        v["store_totals"]["S0"].update(score=0.0, valenced_weight=0.0,
+                                       weighted_evidence=0.0)
+        merged = site.build_payload(v, None, self._cc())["merged"]
+        assert "r" not in merged["stores"]["S0"]
+
+    def test_a_branch_with_no_valenced_claims_is_skipped_when_calibrating(
+        self,
+    ) -> None:
+        """It has a Google rating but no Reddit mean, so it cannot contribute
+        a residual — including it as zero would flatter the error bar."""
+        v, cc, loc = self._with_branches()
+        v["branch_totals"]["S0"]["Somerville"].update(
+            score=0.0, valenced_weight=0.0, weighted_evidence=0.0
+        )
+        merged = site.build_payload(v, loc, cc)["merged"]
+        assert (merged["branch_calibration"]["residual_sd"]
+                == merged["calibration"]["residual_sd"])
+
+    def test_a_pin_whose_rating_has_no_count_is_skipped(self) -> None:
+        v, cc, loc = self._with_branches()
+        cc["locations"] = {"node/1": {"n": 0, "norm": 0.8},
+                           "node/2": {"n": 0, "norm": 0.6}}
+        merged = site.build_payload(v, loc, cc)["merged"]
+        assert merged["branches"]["S0"]["Somerville"]["share"] == 1.0
 
     def test_too_few_stores_to_calibrate_yields_no_merge(self) -> None:
         cc = {"stores": {"S0": {"n": 500, "norm": 0.6, "thin": False}},
