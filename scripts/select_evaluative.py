@@ -9,15 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from groceries.paths import CORPUS, WORKING_SET  # noqa: E402
 from groceries.select import (  # noqa: E402
     SelectionReport,
     iter_candidates,
     write_candidates,
 )
-
-ROOT = Path(__file__).resolve().parent.parent
-CORPUS = ROOT / "data" / "reddit"
-DEFAULT_OUT = ROOT / "data" / "extraction" / "working_set.jsonl"
 
 
 def format_report(report: SelectionReport) -> str:
@@ -33,10 +30,10 @@ def format_report(report: SelectionReport) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=CORPUS)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--out", type=Path, default=WORKING_SET)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--subreddits",
@@ -44,10 +41,28 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="restrict to these subreddits (e.g. boston Somerville CambridgeMA)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     shards = sorted(args.corpus.glob("*/*/*.ndjson.gz"))
     print(f"{len(shards)} shard files under {args.corpus}")
+    # A typo'd --corpus used to glob nothing, write an empty working set over
+    # the good one, and exit 0. Stage 2 then reported "0 docs to process" and
+    # also exited 0, so the whole pipeline succeeded at doing nothing.
+    if not shards:
+        print(f"refusing to run: no shards match {args.corpus}/*/*/*.ndjson.gz")
+        return 2
+    if args.subreddits is not None:
+        available = {s.parent.name for s in shards}
+        unknown = sorted(set(args.subreddits) - available)
+        if unknown:
+            print(f"refusing to run: no shards for {', '.join(unknown)}")
+            print(f"available: {', '.join(sorted(available))}")
+            return 2
+
     report = SelectionReport()
     n = write_candidates(
         iter_candidates(shards, report, limit=args.limit, subreddits=args.subreddits),
@@ -55,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(format_report(report))
     print(f"\nwrote {n:,} candidates -> {args.out}")
+    if n == 0:
+        print("refusing to call this a success: the working set is empty.")
+        return 1
     return 0
 
 

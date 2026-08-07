@@ -40,6 +40,7 @@ def make_docs(n: int) -> list[Candidate]:
             created_utc=1_700_000_000 + i,
             score=1,
             author="alice",
+            parent_body="",
             permalink=f"/r/boston/comments/p/_/id{i}/",
             stores=["Aldi"],
             text="Aldi is cheap",

@@ -16,6 +16,7 @@ class RawDoc(TypedDict, total=False):
     id: str
     created_utc: int
     author: str
+    parent_id: str
     score: int
     body: str
     title: str
@@ -33,6 +34,7 @@ class Candidate(TypedDict):
     created_utc: int
     score: int | None
     author: str
+    parent_body: str
     permalink: str
     stores: list[str]
     text: str
@@ -50,6 +52,12 @@ class Claim(TypedDict):
     sentiment: Sentiment
     price_signal: PriceSignal
     confidence: Confidence
+    # "cheaper than Shaw's" is not evidence about Shaw's in isolation; without
+    # the comparator the pair reads as two independent observations.
+    comparator_store: str
+    # A closing-down sale or a pandemic stock-out was true once and is not a
+    # durable property of the store.
+    transient: bool
 
 
 class SourcedClaim(Claim):
@@ -69,6 +77,11 @@ class SourcedClaim(Claim):
     created_utc: int
     permalink: str
     score: int | None
+    # Carried purely so stage 3 can cap how many claims one regular poster
+    # contributes to a single cell. Deleted accounts arrive as "" or
+    # "[deleted]"; both are treated as anonymous rather than as one prolific
+    # author, so they are never capped together.
+    author: str
 
 
 @dataclass(frozen=True)

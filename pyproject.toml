@@ -12,8 +12,12 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 disallow_any_generics = true
+# tests/test_cli.py imports the stage CLIs the way they are actually run --
+# as top-level modules off scripts/ -- so mypy has to resolve them the same way.
+mypy_path = "scripts"
 files = ["groceries", "tests", "scripts/select_evaluative.py",
          "scripts/extract_claims.py", "scripts/aggregate_claims.py",
+         "scripts/evaluate_extraction.py",
          "scripts/fetch_reddit_dumps.py", "scripts/verify_reddit_dumps.py",
          "scripts/store_mention_census.py"]
 

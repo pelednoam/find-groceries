@@ -84,6 +84,7 @@ def candidate() -> Candidate:
         created_utc=1_700_000_000,
         score=7,
         author="alice",
+        parent_body="",
         permalink="/r/boston/comments/xyz/_/abc123/",
         stores=["Market Basket"],
         text="Market Basket produce is way cheaper than Star Market.",
@@ -102,6 +103,8 @@ def raw_claim() -> Claim:
         sentiment="positive",
         price_signal="cheap",
         confidence="high",
+        comparator_store="",
+        transient=False,
     )
 
 
@@ -115,4 +118,5 @@ def sourced_claim(raw_claim: Claim) -> SourcedClaim:
     claim["created_utc"] = 1_700_000_000
     claim["permalink"] = "/r/boston/comments/xyz/_/abc123/"
     claim["score"] = 7
+    claim["author"] = "alice"
     return claim

@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from .jsonl import read_jsonl, write_atomic
 from .types import Candidate, RawDoc
@@ -46,8 +46,13 @@ STORE_PATTERNS: dict[str, str] = {
     "Target": r"\btarget\b",
 }
 
+# Compiled WITHOUT re.IGNORECASE and matched against `text.lower()`. re.I
+# applies full Unicode case-folding ('\u017f' folds to 's'), which is strictly
+# wider than str.lower() -- so a gate built on str.lower() could reject text
+# an re.I pattern matches. Using one equivalence on both sides removes the
+# whole class of mismatch.
 STORES: dict[str, re.Pattern[str]] = {
-    name: re.compile(pat, re.I) for name, pat in STORE_PATTERNS.items()
+    name: re.compile(pat) for name, pat in STORE_PATTERNS.items()
 }
 
 # Names that are also ordinary English words — or Boston place names —
@@ -59,7 +64,6 @@ GROCERY_CONTEXT: re.Pattern[str] = re.compile(
     r"\b(grocer|groceries|supermarket|produce|shopping|aisle|cart|checkout|"
     r"milk|eggs|bread|meat|chicken|veggies?|vegetables?|fruit|cheese|seafood|"
     r"deli|frozen|pantry|food shop)",
-    re.I,
 )
 
 EVALUATIVE: re.Pattern[str] = re.compile(
@@ -72,7 +76,6 @@ EVALUATIVE: re.Pattern[str] = re.compile(
     r"dirty|horrible|mediocre|disappointing|never again|dumpster|"
     r"awesome|amazing|love|favorite|favourite|go[\s-]?to|solid|spectacular|"
     r"overrated|underrated|steal|pricier|dollars?|bucks?)\b|\$\d",
-    re.I,
 )
 
 BOT_AUTHORS: frozenset[str] = frozenset(
@@ -80,6 +83,7 @@ BOT_AUTHORS: frozenset[str] = frozenset(
 )
 
 MIN_CHARS = 40
+PARENT_CONTEXT_CHARS = 1500
 MAX_CHARS = 6000
 
 # A necessary condition for any STORE_PATTERNS match: if none of these
@@ -131,24 +135,30 @@ def permalink(raw: RawDoc, subreddit: str, kind: str) -> str:
 
 
 def matched_stores(text: str) -> list[str]:
-    """Store names the text mentions, after context-gating generic words."""
-    hits = [name for name, pat in STORES.items() if pat.search(text)]
+    """Store names the text mentions, after context-gating generic words.
+
+    Case folding happens once, here, so the pre-gate and the patterns share
+    one definition of equality.
+    """
+    lowered = text.lower()
+    hits = [name for name, pat in STORES.items() if pat.search(lowered)]
     if not hits:
         return []
-    if GROCERY_CONTEXT.search(text):
+    if GROCERY_CONTEXT.search(lowered):
         return hits
     # No food context, so names that are also ordinary English words don't count.
     return [h for h in hits if h not in CONTEXT_GATED]
 
 
 def is_evaluative(text: str) -> bool:
-    return EVALUATIVE.search(text) is not None
+    return EVALUATIVE.search(text.lower()) is not None
 
 
 def first_mention(text: str, stores: Iterable[str]) -> int:
     """Character offset of the earliest mention of any of `stores`."""
+    lowered = text.lower()
     starts = [
-        m.start() for store in stores if (m := STORES[store].search(text)) is not None
+        m.start() for store in stores if (m := STORES[store].search(lowered)) is not None
     ]
     return min(starts, default=0)
 
@@ -171,13 +181,20 @@ def excerpt(text: str, stores: list[str]) -> tuple[str, bool]:
 
 
 def make_candidate(
-    raw: RawDoc, subreddit: str, kind: str, stores: list[str], text: str
+    raw: RawDoc,
+    subreddit: str,
+    kind: str,
+    stores: list[str],
+    text: str,
+    parent_body: str = "",
 ) -> Candidate:
     body, truncated = excerpt(text, stores)
     # Recomputed against the text actually sent: the prompt names these as
     # pre-filter matches, and advertising a store the model cannot see is an
     # invitation to invent a claim about it.
-    visible = matched_stores(body)
+    # When the store is only named by the parent, the excerpt legitimately
+    # contains none -- keep the inherited list rather than emptying it.
+    visible = matched_stores(body) or stores
     return Candidate(
         id=raw["id"],
         subreddit=subreddit,
@@ -185,6 +202,7 @@ def make_candidate(
         created_utc=raw["created_utc"],
         score=raw.get("score"),
         author=raw.get("author", ""),
+        parent_body=parent_body[:PARENT_CONTEXT_CHARS],
         permalink=permalink(raw, subreddit, kind),
         stores=visible,
         text=body,
@@ -196,36 +214,70 @@ def is_bot(raw: RawDoc) -> bool:
     return raw.get("author", "") in BOT_AUTHORS
 
 
-def evaluate(raw: RawDoc, subreddit: str, kind: str) -> Candidate | None:
-    """Return a Candidate if this document qualifies, else None."""
+def evaluate(
+    raw: RawDoc, subreddit: str, kind: str, parent_body: str = ""
+) -> Candidate | None:
+    """Return a Candidate if this document qualifies, else None.
+
+    Two ways to qualify. Either the text names a store itself, or it is
+    evaluative grocery talk whose parent comment names exactly one store --
+    "the parking there is at least less terrible than Everett" is a real claim
+    about a store the reply never names. Requiring exactly one parent store
+    keeps the referent unambiguous.
+    """
     if is_bot(raw):
         return None
     text = doc_text(raw)
     if len(text) < MIN_CHARS:
         return None
-    if not may_mention_store(text.lower()):
-        return None
     if not is_evaluative(text):
         return None
-    stores = matched_stores(text)
-    if not stores:
+
+    if may_mention_store(text.lower()) and (stores := matched_stores(text)):
+        return make_candidate(raw, subreddit, kind, stores, text, parent_body)
+
+    # Inherited referent: the reply carries the judgement, the parent names
+    # the store. Require grocery context so unrelated replies don't ride along.
+    if not parent_body or not GROCERY_CONTEXT.search(text.lower()):
         return None
-    return make_candidate(raw, subreddit, kind, stores, text)
+    parent_stores = matched_stores(parent_body)
+    if len(parent_stores) != 1:
+        return None
+    return make_candidate(raw, subreddit, kind, parent_stores, text, parent_body)
 
 
-def iter_shard(path: Path) -> Iterator[tuple[RawDoc, str, str]]:
-    """Yield (raw, subreddit, kind) for every record in one shard file."""
+def parent_index(rows: list[RawDoc]) -> dict[str, str]:
+    """Map comment id -> body for parent lookups within one shard."""
+    return {r["id"]: r["body"] for r in rows if r.get("id") and r.get("body")}
+
+
+def parent_of(raw: RawDoc, index: dict[str, str]) -> str:
+    """Body of this document's parent comment, or "" if not in this shard."""
+    parent = raw.get("parent_id", "")
+    if not parent.startswith("t1_"):
+        return ""  # t3_ parents are the post itself, not a comment
+    return index.get(parent[3:], "")
+
+
+def read_shard(path: Path) -> tuple[list[RawDoc], str, str]:
+    """Read one shard fully, so parents can be resolved before evaluating.
+
+    Streaming would use less memory, but a reply's parent can appear anywhere
+    in the shard -- including after it -- so the index has to be complete
+    before the first document is judged. The largest shard is ~40MB.
+    """
     kind = path.parent.parent.name
     subreddit = path.parent.name
+    rows: list[RawDoc] = []
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         for line in fh:
             try:
-                raw = json.loads(line)
+                rows.append(json.loads(line))
             except json.JSONDecodeError:
                 # One corrupt line in a 1,504-shard corpus must not abort a
                 # scan that takes five minutes.
                 continue
-            yield raw, subreddit, kind
+    return rows, subreddit, kind
 
 
 def iter_candidates(
@@ -241,11 +293,15 @@ def iter_candidates(
     """
     seen_texts: set[str] = set()
     for shard in shards:
-        for raw, subreddit, kind in iter_shard(shard):
-            if subreddits is not None and subreddit not in subreddits:
-                continue
+        # Filter on the path before decompressing: restricting to three of
+        # four subreddits otherwise still inflates every shard of the fourth.
+        if subreddits is not None and shard.parent.name not in subreddits:
+            continue
+        rows, subreddit, kind = read_shard(shard)
+        index = parent_index(rows)
+        for raw in rows:
             report.scanned += 1
-            cand = evaluate(raw, subreddit, kind)
+            cand = evaluate(raw, subreddit, kind, parent_of(raw, index))
             if cand is None:
                 continue
             # Reposted boilerplate is the single biggest contamination risk:
@@ -282,6 +338,37 @@ def write_candidates(candidates: Iterable[Candidate], path: Path) -> int:
     )
 
 
-def read_candidates(path: Path) -> list[Candidate]:
-    rows, _unparseable = read_jsonl(path)
-    return [cast(Candidate, r) for r in rows]
+CANDIDATE_FIELDS: Final[frozenset[str]] = frozenset(Candidate.__annotations__)
+
+
+def _is_candidate(row: object) -> bool:
+    """Reject rows stage 2 would only fail on later, at cost.
+
+    A working set written by an older version of stage 1 is missing fields the
+    prompt builder indexes into. Blindly casting turned that into a KeyError
+    per document, after the request had been paid for.
+    """
+    if not isinstance(row, dict) or not CANDIDATE_FIELDS <= row.keys():
+        return False
+    if not isinstance(row.get("created_utc"), int) or isinstance(
+        row.get("created_utc"), bool
+    ):
+        return False
+    if not isinstance(row.get("stores"), list) or not all(
+        isinstance(s, str) for s in row["stores"]
+    ):
+        return False
+    score = row.get("score")
+    if score is not None and (not isinstance(score, int) or isinstance(score, bool)):
+        return False
+    return all(
+        isinstance(row.get(f), str)
+        for f in ("id", "subreddit", "kind", "author", "parent_body", "permalink", "text")
+    )
+
+
+def read_candidates(path: Path) -> tuple[list[Candidate], int]:
+    """Read the working set. Returns (candidates, n_dropped)."""
+    rows, unparseable = read_jsonl(path)
+    good = [cast(Candidate, r) for r in rows if _is_candidate(r)]
+    return good, len(rows) - len(good) + unparseable

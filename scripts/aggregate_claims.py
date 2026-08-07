@@ -14,35 +14,62 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from groceries.aggregate import (  # noqa: E402
+    DEFAULT_MIN_WEIGHT,
     aggregate,
     format_store,
     format_totals,
     read_claims,
     write_verdicts,
 )
+from groceries.paths import CLAIMS, DONE, VERDICTS, WORKING_SET  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-EXTRACT_DIR = ROOT / "data" / "extraction"
+
+def corpus_provenance(claims_path: Path) -> dict[str, object]:
+    """What the verdicts were computed from.
+
+    Without this the output is a set of confident numbers with no way to tell
+    whether they came from the full corpus or from a 150-document calibration
+    sample — a distinction that changes how much any of them is worth.
+    """
+    provenance: dict[str, object] = {"claims_file": claims_path.name}
+    for label, path in (("working_set", WORKING_SET), ("documents_extracted", DONE)):
+        if path.exists():
+            with path.open(encoding="utf-8") as fh:
+                provenance[label] = sum(1 for line in fh if line.strip())
+    return provenance
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--claims", type=Path, default=CLAIMS)
+    parser.add_argument("--out", type=Path, default=VERDICTS)
+    parser.add_argument("--store", default=None)
+    parser.add_argument("--min-weight", type=float, default=DEFAULT_MIN_WEIGHT)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--claims", type=Path, default=EXTRACT_DIR / "claims.jsonl")
-    parser.add_argument("--out", type=Path, default=EXTRACT_DIR / "store_verdicts.json")
-    parser.add_argument("--store", default=None)
-    parser.add_argument("--min-weight", type=float, default=1.0)
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
 
+    if not args.claims.exists():
+        print(f"no claims file at {args.claims}")
+        print("Run scripts/extract_claims.py first.")
+        return 2
     claims, dropped = read_claims(args.claims)
     if dropped:
         print(f"warning: dropped {dropped:,} malformed claim rows")
-    if dropped and not claims:
-        # Every row was rejected — writing now would replace a good verdict
-        # file with an empty one and still report success.
-        print(f"refusing to write: all {dropped:,} rows were rejected.")
-        print("The claims file is probably from an older schema.")
+    if not claims:
+        # Writing now would replace a good verdict file with an empty one and
+        # still report success.
+        print(f"refusing to write: no usable claims in {args.claims}.")
+        if dropped:
+            print(f"All {dropped:,} rows were rejected — probably an older schema.")
         return 1
-    summary = aggregate(claims, min_weight=args.min_weight)
+    summary = aggregate(
+        claims,
+        min_weight=args.min_weight,
+        corpus=corpus_provenance(args.claims),
+    )
     write_verdicts(summary, args.out)
 
     if args.store:

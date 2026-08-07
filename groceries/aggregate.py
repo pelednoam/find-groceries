@@ -1,14 +1,31 @@
-"""Stage 3: roll claims up into per-store, per-category verdicts.
+"""Stage 3: roll claims up into verdicts a shopper can act on.
 
-Reddit opinion goes stale — a 2018 verdict on a store that has since been
-renovated should not outweigh a 2025 one. Claims are weighted by age with a
-four-year half-life and by the extractor's own confidence.
+Design notes, each answering a specific criticism of the previous version:
+
+* **Branch matters more than chain.** The corpus insists on it — "the Stop &
+  Shop in Mission Hill is one of the best", "H Mart Burlington is cheaper than
+  Central Square". Cells are keyed on (store, location, category) with a
+  chain-level parent, so a Cambridge reader is not told about Westwood.
+* **Items are indexed separately.** Collapsing every `specific_item` claim for
+  a store into one scalar answers nothing; "is this worth buying here" needs
+  its own index.
+* **Price is ordinal, not categorical.** A plurality vote over
+  cheap/fair/expensive picked "fair" for Whole Foods when three of five claims
+  said expensive. Scored on a line instead.
+* **Thin evidence is shrunk toward neutral.** One claim at +1.00 and forty at
+  +0.70 were previously indistinguishable in the output.
+* **Not every claim is an independent opinion.** Upvotes, per-author and
+  per-document caps, and reciprocal-comparison collapsing all bear on that.
+* **Reddit opinion goes stale at different rates.** Cleanliness ages faster
+  than a decades-stable price gap, so the half-life is per category.
 """
 
 from __future__ import annotations
 
 import heapq
 import json
+import math
+import re
 import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -20,195 +37,184 @@ from typing import Any, Final, cast
 from .jsonl import read_jsonl, write_atomic
 from .types import SourcedClaim
 
-HALF_LIFE_YEARS: Final = 4.0
+DEFAULT_HALF_LIFE_YEARS: Final = 4.0
 SECONDS_PER_YEAR: Final = 365.25 * 24 * 3600
 
-CONFIDENCE_WEIGHT: Final[Mapping[str, float]] = {
-    "high": 1.0, "medium": 0.6, "low": 0.3,
+# Things that change on a renovation cycle age faster than a structural price
+# gap that has held for decades.
+HALF_LIFE_BY_CATEGORY: Final[Mapping[str, float]] = {
+    "cleanliness": 2.0,
+    "service_checkout": 2.0,
+    "crowding_hours": 2.0,
+    "parking_access": 3.0,
+    "delivery_online": 2.0,
+    "deals_loyalty": 1.5,
+    "selection": 3.0,
+    "store_lifecycle": 1.0,
+    "price_overall": 7.0,
+    "quality_overall": 6.0,
 }
-SENTIMENT_SCORE: Final[Mapping[str, float]] = {
-    "positive": 1.0, "mixed": 0.0, "neutral": 0.0, "negative": -1.0,
-}
+
+CONFIDENCE_WEIGHT: Final[Mapping[str, float]] = {"high": 1.0, "medium": 0.6, "low": 0.3}
 DEFAULT_CONFIDENCE_WEIGHT: Final = 0.6
+SENTIMENT_SCORE: Final[Mapping[str, float]] = {"positive": 1.0, "negative": -1.0}
+PRICE_SCORE: Final[Mapping[str, float]] = {"cheap": -1.0, "fair": 0.0, "expensive": 1.0}
+
+# Pulls a thin cell toward 0. With k=2, one high-confidence claim reads ~+0.33
+# rather than +1.00, and forty claims are barely damped.
+SHRINKAGE_K: Final = 2.0
+# One effusive comment produced six of a store's eight claims in calibration.
+MAX_CLAIMS_PER_DOCUMENT: Final = 3
+# One opinionated regular over eight years is not many independent opinions.
+MAX_CLAIMS_PER_AUTHOR_CELL: Final = 2
 POSITIVE_THRESHOLD: Final = 0.15
+# Roughly one low-confidence claim from this decade. Below that a cell is one
+# person's passing remark, and printing a number for it implies more.
+DEFAULT_MIN_WEIGHT: Final = 0.3
+MIN_TIMESTAMP: Final = 1_100_000_000  # ~2004; Reddit did not exist before this
+# Placeholders the dumps use for accounts that no longer exist. Capping these
+# together would treat every deleted account in the corpus as one person.
+ANONYMOUS_AUTHORS: Final[frozenset[str]] = frozenset(
+    {"", "[deleted]", "[removed]", "AutoModerator"}
+)
+
+CellKey = tuple[str, str, str]  # store, location, category
+
+REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"store", "category", "claim", "sentiment", "confidence",
+     "source_key", "created_utc", "permalink"}
+)
+STRING_FIELDS: Final[tuple[str, ...]] = (
+    "store", "category", "claim", "sentiment", "confidence", "source_key",
+    "permalink",
+)
+# C0/C1/DEL, bidi overrides, and zero-width formatting. Newline and tab go too:
+# these render into a terminal and into one-line table cells.
+UNSAFE_TEXT: Final = re.compile(
+    "[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]"
+)
 
 
-def recency_weight(created_utc: int, now: int, half_life_years: float = HALF_LIFE_YEARS) -> float:
+def scrub(value: str) -> str:
+    """Remove characters that can rewrite a terminal or hide text."""
+    return UNSAFE_TEXT.sub("", value)
+
+
+def half_life_for(category: str) -> float:
+    return HALF_LIFE_BY_CATEGORY.get(category, DEFAULT_HALF_LIFE_YEARS)
+
+
+def recency_weight(created_utc: int, now: int, half_life_years: float) -> float:
     """Exponential decay by age. Future timestamps clamp to weight 1.0."""
     years = max((now - created_utc) / SECONDS_PER_YEAR, 0.0)
     return float(0.5 ** (years / half_life_years))
+
+
+def vote_weight(score: int | None) -> float:
+    """Community agreement, damped. A downvoted claim is discounted.
+
+    Upvotes are a weak signal but not no signal, so this moves weight within
+    roughly [0.5, 2.0] rather than letting one viral comment dominate.
+    """
+    if score is None:
+        return 1.0
+    if score < 0:
+        return 0.5
+    return float(min(1.0 + math.log1p(score) / 5.0, 2.0))
 
 
 def claim_weight(claim: SourcedClaim, now: int) -> float:
     confidence = CONFIDENCE_WEIGHT.get(
         claim.get("confidence", ""), DEFAULT_CONFIDENCE_WEIGHT
     )
-    return recency_weight(claim["created_utc"], now) * confidence
+    decay = recency_weight(claim["created_utc"], now, half_life_for(claim["category"]))
+    return decay * confidence * vote_weight(claim.get("score"))
 
 
 @dataclass
 class Cell:
-    """Accumulated evidence for one (store, category) pair."""
+    """Accumulated evidence for one (store, location, category) triple."""
 
     n: int = 0
     weight: float = 0.0
     score: float = 0.0
-    price: dict[str, float] = field(default_factory=dict)
+    valenced_weight: float = 0.0
+    price_score: float = 0.0
+    price_weight: float = 0.0
+    price_counts: dict[str, int] = field(default_factory=dict)
     examples: list[tuple[float, SourcedClaim]] = field(default_factory=list)
 
     def add(self, claim: SourcedClaim, weight: float) -> None:
         self.n += 1
         self.weight += weight
-        self.score += weight * SENTIMENT_SCORE.get(claim.get("sentiment", ""), 0.0)
+        sentiment = claim.get("sentiment", "neutral")
+        if sentiment in SENTIMENT_SCORE:
+            # Neutral and mixed count as evidence but must not drag the mean
+            # toward zero -- "nobody had a view" is not "views cancelled out".
+            self.score += weight * SENTIMENT_SCORE[sentiment]
+            self.valenced_weight += weight
         signal = claim.get("price_signal", "none")
-        if signal != "none":
-            self.price[signal] = self.price.get(signal, 0.0) + weight
+        if signal in PRICE_SCORE:
+            self.price_score += weight * PRICE_SCORE[signal]
+            self.price_weight += weight
+            self.price_counts[signal] = self.price_counts.get(signal, 0) + 1
         self.examples.append((weight, claim))
 
     def sentiment(self) -> float:
-        return self.score / self.weight if self.weight else 0.0
+        """Weighted mean, shrunk toward 0 by the evidence actually present."""
+        if not self.valenced_weight:
+            return 0.0
+        return self.score / (self.valenced_weight + SHRINKAGE_K)
 
-    def dominant_price(self) -> str | None:
-        if not self.price:
+    def price_level(self) -> float | None:
+        """-1 cheap .. +1 expensive, shrunk. None when cost is undiscussed."""
+        if not self.price_weight:
             return None
-        return max(self.price, key=lambda k: self.price[k])
+        return self.price_score / (self.price_weight + SHRINKAGE_K)
+
+    def price_label(self) -> str | None:
+        level = self.price_level()
+        if level is None:
+            return None
+        if level < -POSITIVE_THRESHOLD:
+            return "cheap"
+        if level > POSITIVE_THRESHOLD:
+            return "expensive"
+        return "fair"
 
     def top_examples(self, n: int) -> list[SourcedClaim]:
-        heaviest = heapq.nlargest(n, self.examples, key=itemgetter(0))
-        return [claim for _, claim in heaviest]
+        return [c for _, c in heapq.nlargest(n, self.examples, key=itemgetter(0))]
+
+
+@dataclass
+class Totals:
+    """Per-store rollup, derived from cells rather than accumulated twice."""
+
+    n: int = 0
+    weight: float = 0.0
+    score: float = 0.0
+    valenced_weight: float = 0.0
+
+    def sentiment(self) -> float:
+        if not self.valenced_weight:
+            return 0.0
+        return self.score / (self.valenced_weight + SHRINKAGE_K)
 
 
 def month(created_utc: int) -> str:
     return time.strftime("%Y-%m", time.gmtime(created_utc))
 
 
-def dedupe(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
-    """Drop claims repeated by a crash-resume.
-
-    `Sink.write` flushes claims before the done-key, so a process killed
-    between those two flushes re-extracts the document on the next run and
-    appends its claims a second time. Identity is (source document, store,
-    category, claim text) — the same document legitimately yields several
-    claims, but not two identical ones.
-    """
-    seen: set[tuple[str, str, str, str]] = set()
-    out: list[SourcedClaim] = []
-    for claim in claims:
-        # source_key, not source_id: Reddit base-36 ids collide across the
-        # post and comment namespaces, so id alone would merge a post and a
-        # comment that happen to make the same claim.
-        key = (
-            claim["source_key"],
-            claim["store"],
-            claim["category"],
-            claim["claim"],
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(claim)
-    return out
-
-
-def build(claims: Iterable[SourcedClaim], now: int) -> dict[tuple[str, str], Cell]:
-    """Accumulate per-(store, category) evidence."""
-    cells: dict[tuple[str, str], Cell] = defaultdict(Cell)
-    for claim in claims:
-        cells[(claim["store"], claim["category"])].add(claim, claim_weight(claim, now))
-    return dict(cells)
-
-
-@dataclass
-class Totals:
-    """Per-store rollup. Derived from the cells rather than accumulated twice."""
-
-    n: int = 0
-    weight: float = 0.0
-    score: float = 0.0
-
-    def sentiment(self) -> float:
-        return self.score / self.weight if self.weight else 0.0
-
-
-def totals_from(cells: Mapping[tuple[str, str], Cell]) -> dict[str, Totals]:
-    """Sum cells per store. Unfiltered — totals count suppressed cells too."""
-    totals: dict[str, Totals] = defaultdict(Totals)
-    for (store, _category), cell in cells.items():
-        t = totals[store]
-        t.n += cell.n
-        t.weight += cell.weight
-        t.score += cell.score
-    return dict(totals)
-
-
-def aggregate(
-    claims: Iterable[SourcedClaim],
-    now: int | None = None,
-    min_weight: float = 1.0,
-    max_examples: int = 5,
-) -> dict[str, Any]:
-    """Produce the verdict document the app queries."""
-    stamp = int(time.time()) if now is None else now
-    cells = build(dedupe(claims), stamp)
-    totals = totals_from(cells)
-
-    stores: dict[str, dict[str, Any]] = {}
-    for (store, category), cell in cells.items():
-        if cell.weight < min_weight:
-            continue
-        stores.setdefault(store, {})[category] = {
-            "n_claims": cell.n,
-            "weighted_evidence": round(cell.weight, 2),
-            "sentiment": round(cell.sentiment(), 3),
-            "price_signal": cell.dominant_price(),
-            "evidence": [
-                {
-                    "claim": c["claim"],
-                    "date": month(c["created_utc"]),
-                    "permalink": c["permalink"],
-                    "confidence": c.get("confidence", "medium"),
-                }
-                for c in cell.top_examples(max_examples)
-            ],
-        }
-
-    return {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
-        "half_life_years": HALF_LIFE_YEARS,
-        "stores": stores,
-        "store_totals": {
-            store: {
-                "n_claims": t.n,
-                "weighted_evidence": round(t.weight, 2),
-                "sentiment": round(t.sentiment(), 3),
-            }
-            for store, t in totals.items()
-        },
-    }
-
-
-REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
-    {"store", "category", "claim", "sentiment", "confidence",
-     "source_key", "created_utc", "permalink"}
-)
-
-
-STRING_FIELDS: Final[tuple[str, ...]] = (
-    "store", "category", "claim", "sentiment", "confidence", "source_key",
-    "permalink",
-)
-
-
 def _is_valid(row: Any) -> bool:
-    """Validate the whole row, not just key presence.
-
-    Presence-only checking let `{"store": []}` reach `dedupe`, where an
-    unhashable value in the identity tuple raises instead of being rejected
-    at the boundary that claims to own this.
-    """
+    """Validate the whole row, not just key presence."""
     if not isinstance(row, dict) or not REQUIRED_FIELDS <= row.keys():
         return False
-    if not isinstance(row.get("created_utc"), int):
+    ts = row.get("created_utc")
+    if not isinstance(ts, int) or isinstance(ts, bool):
+        return False
+    # An out-of-range int passes isinstance and then raises inside time.gmtime,
+    # so bound it here rather than at the formatter.
+    if not MIN_TIMESTAMP <= ts <= int(time.time()) + SECONDS_PER_YEAR:
         return False
     return all(isinstance(row.get(f), str) for f in STRING_FIELDS)
 
@@ -216,13 +222,251 @@ def _is_valid(row: Any) -> bool:
 def read_claims(path: Path) -> tuple[list[SourcedClaim], int]:
     """Read claims, dropping malformed rows. Returns (claims, n_dropped).
 
-    This is the pipeline's trust boundary for on-disk data: everything
-    downstream may assume provenance is present, so rows that lack it are
-    rejected here rather than silently defaulted deep in the scoring math.
+    Scrubbing happens here as well as on the write path: this is the trust
+    boundary for on-disk data, and a claims file produced by an older version
+    of the pipeline has not been through the stage-2 scrubber.
     """
     rows, unparseable = read_jsonl(path)
-    good: list[SourcedClaim] = [cast(SourcedClaim, r) for r in rows if _is_valid(r)]
+    good: list[SourcedClaim] = []
+    for row in rows:
+        if not _is_valid(row):
+            continue
+        for f in ("claim", "location", "item", "comparator_store"):
+            if isinstance(row.get(f), str):
+                row[f] = scrub(row[f])
+        good.append(cast(SourcedClaim, row))
     return good, len(rows) - len(good) + unparseable
+
+
+def dedupe(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
+    """Drop claims repeated by a crash-resume.
+
+    `Sink.write` flushes claims before the done-key, so a process killed
+    between the two re-extracts the document and appends its claims again.
+    Identity is the canonical document key -- not `source_id`, since Reddit
+    base-36 ids collide across the post and comment namespaces.
+    """
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[SourcedClaim] = []
+    for claim in claims:
+        key = (claim["source_key"], claim["store"], claim["category"], claim["claim"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(claim)
+    return out
+
+
+def collapse_reciprocals(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
+    """Mark both halves of a comparison made by one document.
+
+    "Market Basket is cheaper than Shaw's" yields a claim about each store.
+    They are one observation, not two, and counting them as two let Shaw's
+    accumulate a reputation that was really the shadow of Market Basket
+    enthusiasm. Marked here, half-weighted in `build`.
+    """
+    by_doc: dict[str, list[SourcedClaim]] = defaultdict(list)
+    for claim in claims:
+        by_doc[claim["source_key"]].append(claim)
+    out: list[SourcedClaim] = []
+    for group in by_doc.values():
+        stores = {c["store"] for c in group}
+        for claim in group:
+            comparator = claim.get("comparator_store", "")
+            if comparator and comparator in stores:
+                marked = dict(claim)
+                marked["_reciprocal"] = True
+                out.append(cast(SourcedClaim, marked))
+            else:
+                out.append(claim)
+    return out
+
+
+def limit_per_source(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
+    """Cap how much one document, and one author per cell, can contribute.
+
+    Highest-confidence claims are kept: the cap should discard the weakest
+    part of a prolific poster's contribution, not an arbitrary part of it.
+    """
+    per_doc: dict[str, int] = defaultdict(int)
+    per_author: dict[CellKey, int] = defaultdict(int)
+    out: list[SourcedClaim] = []
+    ordered = sorted(
+        claims,
+        key=lambda c: -CONFIDENCE_WEIGHT.get(
+            c.get("confidence", ""), DEFAULT_CONFIDENCE_WEIGHT
+        ),
+    )
+    for claim in ordered:
+        doc = claim["source_key"]
+        if per_doc[doc] >= MAX_CLAIMS_PER_DOCUMENT:
+            continue
+        # Deleted and suppressed accounts are not one prolific poster.
+        author = claim.get("author", "")
+        anonymous = author in ANONYMOUS_AUTHORS
+        author_key = (author, claim["store"], claim["category"])
+        if not anonymous and per_author[author_key] >= MAX_CLAIMS_PER_AUTHOR_CELL:
+            continue
+        per_doc[doc] += 1
+        if not anonymous:
+            per_author[author_key] += 1
+        out.append(claim)
+    return out
+
+
+def prepare(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
+    """Everything that must happen before anything is counted."""
+    return limit_per_source(collapse_reciprocals(dedupe(claims)))
+
+
+def build(
+    claims: Iterable[SourcedClaim], now: int, exclude_transient: bool = True
+) -> tuple[dict[CellKey, Cell], dict[str, Cell]]:
+    """Accumulate branch-level cells and a per-store item index."""
+    cells: dict[CellKey, Cell] = defaultdict(Cell)
+    items: dict[str, Cell] = defaultdict(Cell)
+    for claim in claims:
+        if exclude_transient and claim.get("transient"):
+            continue
+        weight = claim_weight(claim, now)
+        if claim.get("_reciprocal"):
+            weight *= 0.5
+        location = claim.get("location", "").strip()
+        cells[(claim["store"], location, claim["category"])].add(claim, weight)
+        item = claim.get("item", "").strip().lower()
+        if item:
+            items[f"{claim['store']}|{item}"].add(claim, weight)
+    return dict(cells), dict(items)
+
+
+def chain_rollup(cells: Mapping[CellKey, Cell]) -> dict[tuple[str, str], Cell]:
+    """Fold every branch of a chain into one (store, category) cell."""
+    rolled: dict[tuple[str, str], Cell] = defaultdict(Cell)
+    for (store, _location, category), cell in cells.items():
+        parent = rolled[(store, category)]
+        parent.n += cell.n
+        parent.weight += cell.weight
+        parent.score += cell.score
+        parent.valenced_weight += cell.valenced_weight
+        parent.price_score += cell.price_score
+        parent.price_weight += cell.price_weight
+        for k, v in cell.price_counts.items():
+            parent.price_counts[k] = parent.price_counts.get(k, 0) + v
+        parent.examples.extend(cell.examples)
+    return dict(rolled)
+
+
+def totals_from(
+    cells: Mapping[tuple[str, str], Cell], shopping_only: bool = True
+) -> dict[str, Totals]:
+    """Sum chain cells per store.
+
+    `shopping_only` drops labor_ethics and store_lifecycle: both are real, but
+    a headline "which store is best" number built partly on regional civic
+    affection for a chain is not answering the question asked.
+    """
+    from .extract import NON_SHOPPING_CATEGORIES
+
+    totals: dict[str, Totals] = defaultdict(Totals)
+    for (store, category), cell in cells.items():
+        if shopping_only and category in NON_SHOPPING_CATEGORIES:
+            continue
+        t = totals[store]
+        t.n += cell.n
+        t.weight += cell.weight
+        t.score += cell.score
+        t.valenced_weight += cell.valenced_weight
+    return dict(totals)
+
+
+def _cell_view(cell: Cell, max_examples: int) -> dict[str, Any]:
+    level = cell.price_level()
+    return {
+        "n_claims": cell.n,
+        "weighted_evidence": round(cell.weight, 2),
+        "sentiment": round(cell.sentiment(), 3),
+        "price_level": None if level is None else round(level, 3),
+        "price_signal": cell.price_label(),
+        "price_distribution": dict(cell.price_counts),
+        "evidence": [
+            {
+                "claim": c["claim"],
+                "date": month(c["created_utc"]),
+                "permalink": c["permalink"],
+                "confidence": c["confidence"],
+                "location": c.get("location", ""),
+            }
+            for c in cell.top_examples(max_examples)
+        ],
+    }
+
+
+def aggregate(
+    claims: Iterable[SourcedClaim],
+    now: int | None = None,
+    min_weight: float = DEFAULT_MIN_WEIGHT,
+    max_examples: int = 5,
+    corpus: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Produce the verdict document the app queries."""
+    stamp = int(time.time()) if now is None else now
+    cells, items = build(prepare(claims), stamp)
+    chain = chain_rollup(cells)
+    totals = totals_from(chain)
+
+    stores: dict[str, dict[str, Any]] = {}
+    for (store, category), cell in chain.items():
+        if cell.weight < min_weight:
+            continue
+        stores.setdefault(store, {})[category] = _cell_view(cell, max_examples)
+
+    branches: dict[str, dict[str, dict[str, Any]]] = {}
+    for (store, location, category), cell in cells.items():
+        if not location or cell.weight < min_weight:
+            continue
+        branches.setdefault(store, {}).setdefault(location, {})[category] = _cell_view(
+            cell, max_examples
+        )
+
+    item_index: dict[str, dict[str, Any]] = {}
+    for key, cell in items.items():
+        if cell.weight < min_weight:
+            continue
+        store, item = key.split("|", 1)
+        item_index.setdefault(store, {})[item] = _cell_view(cell, 2)
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),
+        "method": {
+            "half_life_years": dict(HALF_LIFE_BY_CATEGORY),
+            "default_half_life_years": DEFAULT_HALF_LIFE_YEARS,
+            "shrinkage_k": SHRINKAGE_K,
+            "min_weight": min_weight,
+            "max_claims_per_document": MAX_CLAIMS_PER_DOCUMENT,
+            "max_claims_per_author_cell": MAX_CLAIMS_PER_AUTHOR_CELL,
+            "transient_claims": "excluded",
+            "note": (
+                "sentiment is shrunk toward 0 by shrinkage_k, so thin cells "
+                "read closer to neutral than their raw mean; neutral and mixed "
+                "claims count as evidence but not toward the mean"
+            ),
+        },
+        "corpus": dict(corpus) if corpus else None,
+        "stores": stores,
+        "branches": branches,
+        "items": item_index,
+        "store_totals": {
+            store: {
+                "n_claims": t.n,
+                "weighted_evidence": round(t.weight, 2),
+                "sentiment": round(t.sentiment(), 3),
+                # A store whose every cell was suppressed has no viewable
+                # evidence; saying so beats printing a confident number.
+                "insufficient_evidence": store not in stores,
+            }
+            for store, t in totals.items()
+        },
+    }
 
 
 def write_verdicts(summary: Mapping[str, Any], path: Path) -> None:
@@ -231,11 +475,17 @@ def write_verdicts(summary: Mapping[str, Any], path: Path) -> None:
 
 def format_totals(summary: Mapping[str, Any]) -> str:
     totals: Mapping[str, Mapping[str, Any]] = summary["store_totals"]
-    lines = [f"{'store':<22}{'claims':>8}{'evidence':>10}{'sentiment':>11}", "-" * 51]
-    for store, v in sorted(totals.items(), key=lambda kv: -float(kv[1]["weighted_evidence"])):
+    lines = [
+        f"{'store':<22}{'claims':>8}{'evidence':>10}{'sentiment':>11}  note",
+        "-" * 64,
+    ]
+    for store, v in sorted(
+        totals.items(), key=lambda kv: -float(kv[1]["weighted_evidence"])
+    ):
+        note = "insufficient evidence" if v["insufficient_evidence"] else ""
         lines.append(
             f"{store:<22}{v['n_claims']:>8,}{v['weighted_evidence']:>10.1f}"
-            f"{v['sentiment']:>+11.2f}"
+            f"{v['sentiment']:>+11.2f}  {note}"
         )
     return "\n".join(lines)
 
@@ -246,14 +496,33 @@ def format_store(summary: Mapping[str, Any], store: str, max_evidence: int = 3) 
     if not categories:
         lines.append("  (no claims above the evidence threshold)")
         return "\n".join(lines)
-    ordered = sorted(categories.items(), key=lambda kv: -float(kv[1]["weighted_evidence"]))
+    ordered = sorted(
+        categories.items(), key=lambda kv: -float(kv[1]["weighted_evidence"])
+    )
     for category, v in ordered:
         sentiment = float(v["sentiment"])
-        mark = "+" if sentiment > POSITIVE_THRESHOLD else ("-" if sentiment < -POSITIVE_THRESHOLD else "~")
+        mark = (
+            "+" if sentiment > POSITIVE_THRESHOLD
+            else ("-" if sentiment < -POSITIVE_THRESHOLD else "~")
+        )
         lines.append(
             f"\n  {category:<18} {mark} sentiment={sentiment:+.2f}  "
             f"n={v['n_claims']}  price={v['price_signal'] or '-'}"
         )
         for e in list(v["evidence"])[:max_evidence]:
-            lines.append(f"      [{e['date']}] {e['claim'][:110]}")
+            where = f" [{e['location']}]" if e.get("location") else ""
+            lines.append(f"      [{e['date']}]{where} {e['claim'][:100]}")
+    branches: Mapping[str, Any] = summary.get("branches", {}).get(store, {})
+    if branches:
+        lines.append(
+            f"\n  branches with their own evidence: {', '.join(sorted(branches))}"
+        )
+    items: Mapping[str, Any] = summary.get("items", {}).get(store, {})
+    if items:
+        top = sorted(
+            items.items(), key=lambda kv: -float(kv[1]["weighted_evidence"])
+        )[:5]
+        lines.append(
+            "  items: " + ", ".join(f"{k} ({v['sentiment']:+.2f})" for k, v in top)
+        )
     return "\n".join(lines)

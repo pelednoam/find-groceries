@@ -23,6 +23,14 @@ from groceries.extract import (  # noqa: E402
     format_report,
     pricing_for,
 )
+from groceries.paths import (  # noqa: E402
+    CLAIMS,
+    DONE,
+    EXTRACT_DIR,
+    FAILED,
+    LOCK,
+    WORKING_SET,
+)
 from groceries.runner import (  # noqa: E402
     Limits,
     Paths,
@@ -34,14 +42,10 @@ from groceries.runner import (  # noqa: E402
 )
 from groceries.select import read_candidates  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-EXTRACT_DIR = ROOT / "data" / "extraction"
-DEFAULT_WORKING_SET = EXTRACT_DIR / "working_set_local.jsonl"
 
-
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--working-set", type=Path, default=DEFAULT_WORKING_SET)
+    parser.add_argument("--working-set", type=Path, default=WORKING_SET)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument(
@@ -57,11 +61,19 @@ def main(argv: list[str] | None = None) -> int:
         "--max-cost",
         type=float,
         default=150.0,
-        help="stop the run once estimated spend exceeds this (USD)",
+        help=(
+            "stop the run once estimated spend exceeds this (USD). Estimated "
+            "from Anthropic first-party rates; Bedrock bills at AWS rates, so "
+            "treat this as an order-of-magnitude guard, not an exact budget"
+        ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    lock = EXTRACT_DIR / ".extract.lock"
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    lock = LOCK
     EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -78,12 +90,20 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
-    docs = read_candidates(args.working_set)
-    paths = Paths(
-        claims=EXTRACT_DIR / "claims.jsonl",
-        done=EXTRACT_DIR / "done.txt",
-        failed=EXTRACT_DIR / "failed.jsonl",
-    )
+    if not args.working_set.exists():
+        print(f"no working set at {args.working_set}")
+        print("Run scripts/select_evaluative.py first.")
+        return 2
+    docs, dropped = read_candidates(args.working_set)
+    if dropped:
+        print(f"warning: dropped {dropped:,} malformed rows from the working set")
+    if not docs:
+        # Paying per document to discover the file is unreadable is the
+        # expensive way to learn this.
+        print(f"refusing to run: {args.working_set} yielded no usable candidates.")
+        print("Regenerate it with scripts/select_evaluative.py.")
+        return 2
+    paths = Paths(claims=CLAIMS, done=DONE, failed=FAILED)
 
     done = read_done(paths.done)
     if done:

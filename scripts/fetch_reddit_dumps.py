@@ -121,12 +121,20 @@ def get(session: requests.Session, path: str, params: dict[str, Any]) -> list[di
     raise RuntimeError(f"giving up after {MAX_RETRIES} retries: {path} {params}")
 
 
-def fetch_window(sub: str, kind: str, label: str, after: int, before: int) -> int:
-    """Paginate one month-window to exhaustion and write it out."""
+def fetch_window(
+    sub: str, kind: str, label: str, after: int, before: int, complete: bool = True
+) -> int:
+    """Paginate one month-window to exhaustion and write it out.
+
+    `complete=False` marks a window whose month has not finished yet. Such a
+    window is never treated as done: the resume check used to see the file and
+    skip it, so the month the corpus was first fetched in stayed frozen at
+    however many days had elapsed that day, forever.
+    """
     out_dir = os.path.join(OUT_ROOT, kind, sub)
     os.makedirs(out_dir, exist_ok=True)
     final = os.path.join(out_dir, f"{label}.ndjson.gz")
-    if os.path.exists(final):
+    if complete and os.path.exists(final):
         bump(windows_skipped=1)
         return 0
     part = final + ".part"
@@ -180,6 +188,10 @@ def main() -> int:
     session.headers["User-Agent"] = USER_AGENT
     now = int(time.time())
 
+    # The month `now` falls in is still accumulating posts, so its window can
+    # never be finalised on this run.
+    current_month = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m")
+
     tasks = []
     log("planning windows...")
     for sub in SUBS:
@@ -187,7 +199,9 @@ def main() -> int:
         for kind in KINDS:
             start = meta["earliest_post"] if kind == "posts" else meta["earliest_comment"]
             wins = list(month_windows(start, now))
-            tasks += [(sub, kind, lab, a, b) for lab, a, b in wins]
+            tasks += [
+                (sub, kind, lab, a, b, lab != current_month) for lab, a, b in wins
+            ]
         log(f"  {sub:14} posts={meta['num_posts']:>8,}  comments={meta['num_comments']:>10,}")
 
     # Smallest subreddits first so partial results are useful early.
@@ -197,6 +211,7 @@ def main() -> int:
 
     t0 = time.time()
     done = 0
+    failures: list[dict[str, str]] = []
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futs = {pool.submit(fetch_window, *t): t for t in tasks}
         for f in as_completed(futs):
@@ -206,6 +221,9 @@ def main() -> int:
                 f.result()
             except Exception as e:
                 log(f"  FAILED {sub}/{kind}/{label}: {e}")
+                failures.append(
+                    {"subreddit": sub, "kind": kind, "window": label, "error": str(e)[:300]}
+                )
             if done % 25 == 0 or done == len(tasks):
                 el = time.time() - t0
                 rate = STATS["requests"] / el if el else 0
@@ -219,10 +237,19 @@ def main() -> int:
         "subreddits": SUBS,
         "kinds": KINDS,
         "stats": STATS,
+        # A manifest that records only the successes reads as a complete
+        # corpus, which is exactly the wrong impression after a partial run.
+        "complete": not failures,
+        "incomplete_month": current_month,
+        "failed_windows": failures,
         "elapsed_sec": round(time.time() - t0, 1),
     }
     with open(os.path.join(OUT_ROOT, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
+    if failures:
+        log(f"INCOMPLETE: {len(failures)} of {len(tasks)} windows failed "
+            f"in {(time.time() - t0) / 60:.1f}m — rerun to fill the gaps")
+        return 1
     log(f"DONE {json.dumps(STATS)} in {(time.time() - t0) / 60:.1f}m")
     return 0
 

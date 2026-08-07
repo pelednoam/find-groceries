@@ -26,6 +26,7 @@ def docs(n: int) -> list[Candidate]:
         Candidate(
             id=f"id{i}", subreddit="boston", kind="comments",
             created_utc=1_700_000_000 + i, score=1, author="alice",
+            parent_body="",
             permalink=f"/r/boston/comments/p/_/id{i}/",
             stores=["Aldi"], text="Aldi is cheap", truncated=False,
         )
@@ -37,9 +38,11 @@ def _claim(sentiment: str) -> Any:
     return {
         "store": "Aldi", "location": "", "category": "produce", "item": "",
         "claim": "c", "sentiment": sentiment, "price_signal": "none",
-        "confidence": "high", "source_id": "s", "source_key": "c_boston_s",
+        "confidence": "high", "comparator_store": "", "transient": False,
+        "source_id": "s", "source_key": "c_boston_s",
         "subreddit": "boston", "kind": "comments",
         "created_utc": 1_700_000_000, "permalink": "/p/", "score": 1,
+        "author": "alice",
     }
 
 
@@ -108,6 +111,51 @@ class TestCostCeiling:
         )
         assert stats.stopped is not None and "cost ceiling" in stats.stopped
         assert stats.docs < 50
+
+    def test_billed_but_failed_documents_count_toward_the_ceiling(
+        self, paths: runner.Paths
+    ) -> None:
+        """A response that arrives and then fails to parse has been paid for.
+
+        The ceiling exists precisely for a run that has gone wrong; ignoring
+        the spend of every failed document made it blind in that case.
+        """
+        from tests.conftest import FakeBlock, FakeMessage
+
+        truncated = [
+            FakeMessage([FakeBlock("text", '{"claims": [')], stop_reason="max_tokens")
+            for _ in range(50)
+        ]
+        ex = Extractor(client=FakeClient(truncated), sleep=lambda _: None)
+        stats, _ = runner.run(
+            ex, docs(50), paths, workers=1,
+            limits=runner.Limits(
+                max_cost=0.001,
+                pricing=Pricing(0.0, 1_000_000.0, 0.0, 0.0),
+                max_consecutive_failures=99,
+            ),
+        )
+        assert stats.docs == 0, "every document failed"
+        assert stats.stopped is not None and "cost ceiling" in stats.stopped
+        assert stats.failed < 50, "the ceiling should have stopped the run"
+
+    def test_a_failure_that_was_never_billed_adds_nothing(
+        self, paths: runner.Paths
+    ) -> None:
+        # A connection error carries no usage; the ceiling must not invent any.
+        ex = Extractor(
+            client=FakeClient([BadRequestError() for _ in range(4)]),
+            sleep=lambda _: None,
+        )
+        stats, _ = runner.run(
+            ex, docs(4), paths, workers=1,
+            limits=runner.Limits(
+                max_cost=0.001,
+                pricing=Pricing(1_000_000.0, 1_000_000.0, 0.0, 0.0),
+                max_consecutive_failures=99,
+            ),
+        )
+        assert stats.stopped is None and stats.failed == 4
 
     def test_ceiling_without_a_rate_card_cannot_stop_the_run(
         self, paths: runner.Paths, raw_claim: Any
@@ -223,13 +271,13 @@ class TestWeightedMean:
         cell = aggregate.Cell()
         cell.add(_claim("positive"), 3.0)
         cell.add(_claim("negative"), 1.0)
-        # raw score would be +2.0; the weighted mean is +0.5
-        assert cell.sentiment() == pytest.approx(0.5)
+        # raw score would be +2.0; the shrunk weighted mean is 2/(4+k)
+        assert cell.sentiment() == pytest.approx(2.0 / (4.0 + aggregate.SHRINKAGE_K))
         assert -1.0 <= cell.sentiment() <= 1.0
 
     def test_totals_sentiment_is_normalised(self) -> None:
-        totals = aggregate.Totals(n=2, weight=4.0, score=2.0)
-        assert totals.sentiment() == pytest.approx(0.5)
+        totals = aggregate.Totals(n=2, weight=4.0, score=2.0, valenced_weight=4.0)
+        assert totals.sentiment() == pytest.approx(2.0 / (4.0 + aggregate.SHRINKAGE_K))
 
 
 class TestCrossStageContract:

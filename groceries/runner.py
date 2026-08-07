@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .extract import Extractor, doc_key, record
-from .types import Candidate, Pricing, RunStats, SourcedClaim
+from .types import Candidate, Pricing, RunStats, SourcedClaim, Usage
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 50
 
@@ -135,21 +135,33 @@ def process_one(
         with lock:
             stats.failed += 1
             stats.consecutive_failures += 1
+            # A response that arrived and then failed to parse was billed.
+            stats.usage = stats.usage + getattr(exc, "usage", Usage())
             if stats.consecutive_failures >= limits.max_consecutive_failures:
                 stats.stopped = (
                     f"{stats.consecutive_failures} consecutive failures — "
                     "the run looks systematically broken"
                 )
                 stop.set()
+            elif _over_budget(stats, limits):
+                stop.set()
         return
     with lock:
         record(stats, claims, response)
         stats.consecutive_failures = 0
-        if limits.max_cost is not None and limits.pricing is not None:
-            spent = limits.pricing.cost(stats.usage)
-            if spent > limits.max_cost:
-                stats.stopped = f"cost ceiling reached (${spent:.2f})"
-                stop.set()
+        if _over_budget(stats, limits):
+            stop.set()
+
+
+def _over_budget(stats: RunStats, limits: Limits) -> bool:
+    """Record the stop reason if spend has passed the ceiling. Caller holds the lock."""
+    if limits.max_cost is None or limits.pricing is None:
+        return False
+    spent = limits.pricing.cost(stats.usage)
+    if spent <= limits.max_cost:
+        return False
+    stats.stopped = f"cost ceiling reached (${spent:.2f})"
+    return True
 
 
 def run(

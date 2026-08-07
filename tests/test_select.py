@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -199,6 +200,40 @@ class TestEvaluate:
         assert cand is not None
         assert cand["text"].startswith("Market Basket")
 
+    def test_inherits_a_store_named_only_by_the_parent(self) -> None:
+        raw = self._raw("Their produce is genuinely cheap compared to anywhere else")
+        assert select.evaluate(raw, "boston", "comments") is None
+        cand = select.evaluate(
+            raw, "boston", "comments", parent_body="Market Basket is my go-to."
+        )
+        assert cand is not None
+        assert cand["stores"] == ["Market Basket"]
+        assert cand["parent_body"].startswith("Market Basket")
+
+    def test_an_ambiguous_parent_is_not_inherited(self) -> None:
+        # Two stores in the parent leaves "their produce" without a referent.
+        raw = self._raw("Their produce is genuinely cheap compared to anywhere else")
+        parent = "I go to Market Basket, though Aldi is close too."
+        assert select.evaluate(raw, "boston", "comments", parent_body=parent) is None
+
+    def test_a_storeless_parent_is_not_inherited(self) -> None:
+        raw = self._raw("Their produce is genuinely cheap compared to anywhere else")
+        assert select.evaluate(raw, "boston", "comments", parent_body="I agree.") is None
+
+    def test_inheritance_requires_grocery_context(self) -> None:
+        # Evaluative, but about the parking lot rather than about shopping.
+        raw = self._raw("Honestly the parking lot there is the worst I have seen")
+        assert select.is_evaluative(raw["body"])
+        parent = "Market Basket in Somerville."
+        assert select.evaluate(raw, "boston", "comments", parent_body=parent) is None
+
+    def test_parent_body_is_truncated(self) -> None:
+        raw = self._raw("Their produce is genuinely cheap compared to anywhere else")
+        parent = "Market Basket. " + "x" * (select.PARENT_CONTEXT_CHARS * 2)
+        cand = select.evaluate(raw, "boston", "comments", parent_body=parent)
+        assert cand is not None
+        assert len(cand["parent_body"]) == select.PARENT_CONTEXT_CHARS
+
     def test_first_mention_offset(self) -> None:
         assert select.first_mention("xx Aldi", ["Aldi"]) == 3
         assert select.first_mention("nothing here", ["Aldi"]) == 0
@@ -221,11 +256,48 @@ def _write_shard(root: Path, kind: str, sub: str, name: str, rows: list[RawDoc])
     return path
 
 
-class TestIterShardAndSelect:
-    def test_iter_shard_yields_subreddit_and_kind(self, tmp_path: Path) -> None:
+class TestReadShardAndSelect:
+    def test_read_shard_reports_subreddit_and_kind(self, tmp_path: Path) -> None:
         path = _write_shard(tmp_path, "comments", "boston", "2020-01", [{"id": "a"}])
-        rows = list(select.iter_shard(path))
-        assert rows == [({"id": "a"}, "boston", "comments")]
+        assert select.read_shard(path) == ([{"id": "a"}], "boston", "comments")
+
+    def test_read_shard_skips_a_corrupt_line(self, tmp_path: Path) -> None:
+        path = _write_shard(tmp_path, "comments", "boston", "2020-01", [{"id": "a"}])
+        with gzip.open(path, "at", encoding="utf-8") as fh:
+            fh.write("{truncated\n")
+        rows, _, _ = select.read_shard(path)
+        assert rows == [{"id": "a"}]
+
+    def test_parent_index_skips_rows_without_a_body(self) -> None:
+        rows: list[RawDoc] = [
+            {"id": "a", "body": "hello"}, {"id": "b"}, {"body": "orphan"}
+        ]
+        assert select.parent_index(rows) == {"a": "hello"}
+
+    def test_parent_of_resolves_a_comment_parent(self) -> None:
+        index = {"a": "Market Basket is my go-to."}
+        raw: RawDoc = {"id": "b", "parent_id": "t1_a"}
+        assert select.parent_of(raw, index) == "Market Basket is my go-to."
+
+    @pytest.mark.parametrize("parent_id", ["t3_a", "", "t1_missing"])
+    def test_parent_of_returns_empty_when_unresolvable(self, parent_id: str) -> None:
+        # t3_ is the post itself, not a comment; a t1_ parent outside this
+        # shard is simply absent.
+        raw: RawDoc = {"id": "b", "parent_id": parent_id}
+        assert select.parent_of(raw, {"a": "x"}) == ""
+
+    def test_select_resolves_parents_within_a_shard(self, tmp_path: Path) -> None:
+        rows: list[RawDoc] = [
+            # The reply precedes its parent in the file, so a streaming index
+            # would miss it.
+            {"id": "b", "created_utc": 1, "parent_id": "t1_a",
+             "body": "Their produce is genuinely cheap compared to anywhere else"},
+            {"id": "a", "created_utc": 1, "body": "I shop at Market Basket."},
+        ]
+        path = _write_shard(tmp_path, "comments", "boston", "2020-01", rows)
+        cands, _ = select.select([path])
+        assert [c["id"] for c in cands] == ["b"]
+        assert cands[0]["stores"] == ["Market Basket"]
 
     def test_select_counts_and_filters(self, tmp_path: Path) -> None:
         good: RawDoc = {"id": "a", "created_utc": 1, "body": "Market Basket is so cheap for produce around here"}
@@ -362,12 +434,55 @@ class TestRoundTrip:
     def test_write_then_read(self, tmp_path: Path, candidate: Candidate) -> None:
         path = tmp_path / "nested" / "ws.jsonl"
         assert select.write_candidates([candidate], path) == 1
-        assert select.read_candidates(path) == [candidate]
+        assert select.read_candidates(path) == ([candidate], 0)
 
     def test_read_skips_blank_lines(self, tmp_path: Path, candidate: Candidate) -> None:
         path = tmp_path / "ws.jsonl"
         path.write_text(json.dumps(candidate) + "\n\n", encoding="utf-8")
-        assert len(select.read_candidates(path)) == 1
+        assert select.read_candidates(path) == ([candidate], 0)
+
+    def test_a_truncated_line_is_counted_not_fatal(
+        self, tmp_path: Path, candidate: Candidate
+    ) -> None:
+        path = tmp_path / "ws.jsonl"
+        path.write_text(json.dumps(candidate) + "\n{trunc", encoding="utf-8")
+        assert select.read_candidates(path) == ([candidate], 1)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda c: c.pop("text"), id="missing-field"),
+            pytest.param(lambda c: c.update(created_utc="1700000000"), id="ts-string"),
+            pytest.param(lambda c: c.update(created_utc=True), id="ts-bool"),
+            pytest.param(lambda c: c.update(stores="Aldi"), id="stores-not-a-list"),
+            pytest.param(lambda c: c.update(stores=[7]), id="stores-not-strings"),
+            pytest.param(lambda c: c.update(score="12"), id="score-string"),
+            pytest.param(lambda c: c.update(score=True), id="score-bool"),
+            pytest.param(lambda c: c.update(text=None), id="text-null"),
+        ],
+    )
+    def test_rows_stage2_would_choke_on_are_rejected(
+        self, tmp_path: Path, candidate: Candidate, mutate: Any
+    ) -> None:
+        """Paying per document to discover the working set is stale is the
+        expensive way to learn it."""
+        bad = dict(candidate)
+        mutate(bad)
+        path = tmp_path / "ws.jsonl"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        assert select.read_candidates(path) == ([], 1)
+
+    def test_a_null_score_is_allowed(self, tmp_path: Path, candidate: Candidate) -> None:
+        # Posts genuinely carry no score; that is not corruption.
+        row = {**candidate, "score": None}
+        path = tmp_path / "ws.jsonl"
+        path.write_text(json.dumps(row), encoding="utf-8")
+        assert select.read_candidates(path)[1] == 0
+
+    def test_a_non_object_row_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "ws.jsonl"
+        path.write_text("[1, 2, 3]\n", encoding="utf-8")
+        assert select.read_candidates(path) == ([], 1)
 
 
 class TestSelectionReport:
