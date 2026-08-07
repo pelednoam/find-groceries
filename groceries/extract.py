@@ -459,11 +459,28 @@ def pricing_for(model: str) -> Pricing | None:
 
 
 def estimate_total(stats: RunStats, model: str, total_docs: int) -> float | None:
-    """Extrapolate spend for a full run from a sample; None without a rate card."""
+    """Extrapolate spend for a full run from a sample; None without a rate card.
+
+    Cache *writes* are the one component that does not scale per document.
+    A write happens when the cached system prompt expires and a worker
+    repopulates it, so the count tracks (workers x duration / TTL) — it is
+    roughly constant in absolute terms and amortises away over a long run.
+    Scaling it linearly with the other three overstated a 25k-document run by
+    35%, because it was 27% of a 150-document sample and is ~2% of the real
+    thing. Held flat here, which errs the other way but only slightly: the
+    quantity being held flat is the smallest of the four.
+    """
     pricing = pricing_for(model)
     if pricing is None or stats.docs == 0:
         return None
-    return float(pricing.cost(stats.usage) / stats.docs * total_docs)
+    scale = total_docs / stats.docs
+    projected = Usage(
+        input_tokens=int(stats.usage.input_tokens * scale),
+        output_tokens=int(stats.usage.output_tokens * scale),
+        cache_read_tokens=int(stats.usage.cache_read_tokens * scale),
+        cache_write_tokens=stats.usage.cache_write_tokens,
+    )
+    return float(pricing.cost(projected))
 
 
 def format_report(stats: RunStats, model: str, elapsed: float, total_docs: int | None = None) -> str:

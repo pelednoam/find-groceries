@@ -108,6 +108,51 @@ class TestKeysAndPrompts:
         assert extract.thinking_config(enabled)["type"] == expected
 
 
+class TestCostEstimate:
+    def _stats(self) -> RunStats:
+        # Shaped like the real 150-doc calibration: cache writes were 27% of
+        # spend there and are ~2% of a 25k-document run.
+        return RunStats(
+            docs=150,
+            usage=Usage(
+                input_tokens=36_681, output_tokens=12_458,
+                cache_read_tokens=336_206, cache_write_tokens=40_144,
+            ),
+        )
+
+    def test_cache_writes_do_not_scale_with_documents(self) -> None:
+        """A cache write happens when the cached prompt expires, not when a
+        document is processed. Scaling it linearly overstated the real run
+        by 35%."""
+        stats = self._stats()
+        got = extract.estimate_total(stats, extract.DEFAULT_MODEL, 25_108)
+        assert got is not None
+        pricing = extract.pricing_for(extract.DEFAULT_MODEL)
+        assert pricing is not None
+        naive = pricing.cost(stats.usage) / stats.docs * 25_108
+        assert got < naive * 0.75, "cache writes are still being scaled"
+        assert 60 < got < 80, f"expected ~$68 for the real run, got ${got:.0f}"
+
+    def test_the_sample_itself_is_priced_exactly(self) -> None:
+        stats = self._stats()
+        pricing = extract.pricing_for(extract.DEFAULT_MODEL)
+        assert pricing is not None
+        got = extract.estimate_total(stats, extract.DEFAULT_MODEL, stats.docs)
+        assert got == pytest.approx(pricing.cost(stats.usage), rel=1e-6)
+
+    def test_estimate_grows_with_the_document_count(self) -> None:
+        stats = self._stats()
+        a = extract.estimate_total(stats, extract.DEFAULT_MODEL, 1_000)
+        b = extract.estimate_total(stats, extract.DEFAULT_MODEL, 10_000)
+        assert a is not None and b is not None and a < b
+
+    def test_no_rate_card_means_no_estimate(self) -> None:
+        assert extract.estimate_total(self._stats(), "made-up-v9", 100) is None
+
+    def test_no_documents_means_no_estimate(self) -> None:
+        assert extract.estimate_total(RunStats(), extract.DEFAULT_MODEL, 100) is None
+
+
 class TestSchema:
     def test_schema_is_closed_at_both_levels(self) -> None:
         assert extract.SCHEMA["additionalProperties"] is False
