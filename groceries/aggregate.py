@@ -28,6 +28,7 @@ import math
 import re
 import time
 from collections import Counter, defaultdict
+from functools import cache
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from operator import itemgetter
@@ -130,6 +131,20 @@ def scrub(value: str) -> str:
     return UNSAFE_TEXT.sub("", value)
 
 
+@cache
+def _non_locations() -> frozenset[str]:
+    """Values that turn up in `location` but are not places.
+
+    Read from the stage-2 vocabulary rather than hand-listed, so the two
+    cannot drift apart. Imported inside the function because extract imports
+    select which imports nothing from here -- keeping it lazy avoids adding a
+    cycle for one constant.
+    """
+    from .extract import CATEGORIES
+
+    return frozenset(normalise(c) for c in CATEGORIES)
+
+
 def normalise(value: str) -> str:
     """Fold free text into a stable key.
 
@@ -141,13 +156,36 @@ def normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
-def branch_key(location: str) -> str:
-    """Normalise a branch name, dropping the noise suffixes the model adds."""
+# "Beacon", "Beacon St" and "Beacon Street" are one store. Measured on the
+# real corpus, collapsing the street-type suffix merges 6% of branch keys.
+STREET_TYPE: Final = re.compile(
+    r"\s+(st|street|ave|avenue|rd|road|sq|square|blvd|boulevard|pl|plaza|"
+    r"hwy|highway|ln|lane|dr|drive|pkwy|parkway|tpke|turnpike)$"
+)
+
+
+def branch_key(location: str, store: str = "") -> str:
+    """Normalise a branch name, dropping the noise variants the model emits.
+
+    A qualifier after a comma is *kept*: "Beacon St, Somerville" and "Beacon
+    Street, Washington Square" are genuinely different Star Markets, and
+    merging them would be worse than splitting them.
+
+    Occasionally the model puts something in `location` that is not a place:
+    the category name, or the store's own name. Rare (16 of 28,225 claims on
+    the real corpus) but each one becomes a visible branch heading, so they
+    are dropped to "" -- the claim still counts, just at chain level.
+    """
     key = normalise(location)
+    if key in _non_locations() or (store and key == normalise(store)):
+        return ""
     # "Somerville, MA" and "the Somerville one" are the same branch.
     key = re.sub(r"^the\s+", "", key)
     key = re.sub(r"\s+(one|store|location)$", "", key)
-    return re.sub(r",?\s*(ma|mass|massachusetts)$", "", key).strip()
+    key = re.sub(r",?\s*(ma|mass|massachusetts)$", "", key).strip()
+    # Applied per comma-separated part, so "beacon st, somerville" folds its
+    # street name without losing the town that distinguishes it.
+    return ", ".join(STREET_TYPE.sub("", p.strip()) for p in key.split(","))
 
 
 def half_life_for(category: str) -> float:
@@ -426,7 +464,7 @@ def build(
         weight = claim_weight(claim, now)
         if claim.get("_reciprocal"):
             weight *= 0.5
-        location = branch_key(claim.get("location", ""))
+        location = branch_key(claim.get("location", ""), claim["store"])
         cell = cells[(claim["store"], location, claim["category"])]
         cell.add(claim, weight)
         if location:

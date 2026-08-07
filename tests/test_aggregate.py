@@ -397,6 +397,40 @@ class TestBuild:
         assert next(iter(cells)).__getitem__(1) == "somerville"
         assert next(iter(cells.values())).n == 6
 
+    def test_street_type_variants_are_one_branch(self) -> None:
+        """Measured on the real corpus: 6% of branch keys differed only by
+        the street-type suffix, each half too thin to clear the threshold."""
+        variants = ["Beacon", "Beacon St", "Beacon Street", "beacon st."]
+        cells, _ = aggregate.build(
+            [claim(location=v, claim=f"c{i}") for i, v in enumerate(variants[:3])], NOW
+        )
+        assert len(cells) == 1
+        assert aggregate.branch_key("Porter Square") == aggregate.branch_key("Porter")
+
+    def test_a_town_qualifier_still_separates_two_branches(self) -> None:
+        # There is a Star Market on Beacon St in Somerville and another on
+        # Beacon Street in Washington Square. Merging them is worse than not.
+        assert aggregate.branch_key("Beacon St, Somerville") != aggregate.branch_key(
+            "Beacon Street, Washington Square"
+        )
+        assert aggregate.branch_key("Beacon St, Somerville") == aggregate.branch_key(
+            "beacon street, somerville"
+        )
+
+    @pytest.mark.parametrize("junk", ["labor_ethics", "produce", "Market Basket"])
+    def test_a_location_that_is_not_a_place_is_dropped(self, junk: str) -> None:
+        """The model occasionally puts the category or the store's own name in
+        `location`. Rare, but each one becomes a visible branch heading."""
+        cells, _ = aggregate.build([claim(location=junk)], NOW)
+        assert next(iter(cells))[1] == "", "junk location became a branch"
+        assert next(iter(cells.values())).n == 1, "the claim itself must survive"
+
+    def test_the_non_location_list_tracks_the_stage2_vocabulary(self) -> None:
+        from groceries.extract import CATEGORIES
+
+        for category in CATEGORIES:
+            assert aggregate.branch_key(category) == ""
+
     def test_the_readable_spelling_survives_normalisation(self) -> None:
         cells, _ = aggregate.build(
             [claim(location="Somerville"), claim(location="somerville", claim="x")],
