@@ -3,23 +3,35 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Where to buy groceries — Cambridge, MA</title>
+<title>Basket — where to buy groceries in Cambridge</title>
 <meta name="description" content="Grocery store price and quality signals for Cambridge and Boston, aggregated from 9.6M Reddit posts and comments.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛒</text></svg>">
+<meta name="theme-color" content="#0c1512">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23c6f24e'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='800' text-anchor='middle' fill='%230c1512'>B</text></svg>">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
   <div class="wrap">
-    <h1>🛒 Where to buy groceries</h1>
-    <p class="sub">Cambridge &amp; Boston, from <span id="corpus-line">Reddit</span>.
-      <button type="button" class="linkish" data-view="method">How this works &amp; what it isn't</button>
-    </p>
+    <div class="brandline">
+      <span class="mark" aria-hidden="true">B</span>
+      <span class="brandname">Basket <span>/ Cambridge</span></span>
+    </div>
+
+    <span class="pill-tag"><b>New</b> Now reading Google reviews too</span>
+
+    <h1>Stop guessing <em>where to shop.</em></h1>
+
+    <p class="standfirst">Every grocery store in Cambridge, ranked by what
+      people who actually shop there say — <b id="corpus-line">from Reddit</b>,
+      cross-checked against 135,345 Google reviews, with the receipts attached.</p>
+
+    <dl class="tally" id="tally"></dl>
   </div>
 </header>
 
-<nav class="wrap tabs" role="tablist">
+<nav class="tabs" role="tablist">
+  <div class="inner">
   <button role="tab" data-view="list" class="on">Shopping list</button>
   <button role="tab" data-view="compare">Compare stores</button>
   <button role="tab" data-view="map">Map</button>
@@ -27,6 +39,7 @@
   <button role="tab" data-view="store">Store detail</button>
   <button role="tab" data-view="items">Item search</button>
   <button role="tab" data-view="method">Method</button>
+  </div>
 </nav>
 
 <main class="wrap">
@@ -72,7 +85,7 @@
       <svg id="scatter" viewBox="0 0 640 420" role="img"
            aria-label="Price against quality for each store"></svg>
     </div>
-    <table id="cmp-table" class="data">
+    <div class="scroll-x"><table id="cmp-table" class="data">
       <thead><tr>
         <th data-sort="store">Store</th>
         <th data-sort="price" class="num">Price</th>
@@ -83,7 +96,7 @@
         <th data-sort="w" class="num">Evidence</th>
       </tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
   </section>
 
   <!-- ── Cross-check ───────────────────────────────────────────────── -->
@@ -114,7 +127,7 @@
       <svg id="cross-chart" viewBox="0 0 640 560" role="img"
            aria-label="Reddit verdict against Google rating for each store"></svg>
     </div>
-    <table id="cross-table" class="data">
+    <div class="scroll-x"><table id="cross-table" class="data">
       <thead><tr>
         <th>Store</th>
         <th class="num">Reddit</th>
@@ -126,7 +139,7 @@
         <th class="num">Median</th>
       </tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
     <p class="fineprint" id="cross-cite"></p>
   </section>
 
@@ -198,6 +211,21 @@
           agreeing with each other. Caps limit how much one document or one author
           contributes, but a local consensus is still one consensus.</li>
       </ul>
+
+      <h2>How it works</h2>
+      <ol class="stages">
+        <li><b>Collect.</b> 9.6 million posts and comments from r/boston,
+          r/CambridgeMA and r/Somerville, plus 135,345 Google reviews of the
+          same shops.</li>
+        <li><b>Filter.</b> Keep only the 0.3% that name a store and say
+          something evaluative about it.</li>
+        <li><b>Extract.</b> Read each one with a language model into
+          structured claims — which store, which department, positive or
+          negative, cheap or dear.</li>
+        <li><b>Weigh.</b> Score every claim by how directly the text supports
+          it, how old it is, and how it was voted, then roll them up per
+          store, per branch and per item.</li>
+      </ol>
 
       <h2>How a number is built</h2>
       <p>Each claim gets a weight from three things: how directly the text supports it,
@@ -284,8 +312,8 @@
   </section>
 </main>
 
-<footer class="wrap">
-  <span id="footer-line"></span>
+<footer>
+  <div class="wrap"><span id="footer-line"></span></div>
 </footer>
 
 <script src="vendor/leaflet/leaflet.js"></script>

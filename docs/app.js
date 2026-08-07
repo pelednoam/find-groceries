@@ -363,6 +363,7 @@ function mergedBlock(m, label) {
     }
     box.append(head);
     if (m.r !== undefined && m.g !== undefined) {
+        box.append(reconciliationRail(m.r, m.g, m.v));
         const bar = el("div", { class: "mixbar" });
         bar.append(el("span", { class: "mix reddit", style: `width:${m.share * 100}%` }));
         bar.append(el("span", { class: "mix google", style: `width:${(1 - m.share) * 100}%` }));
@@ -376,6 +377,41 @@ function mergedBlock(m, label) {
         box.append(el("div", { class: "mixlab" }, el("span", { text: m.r !== undefined ? "Reddit only" : "Google only" })));
     }
     return box;
+}
+/** Both sources and the combined figure on one -1..+1 scale.
+ *
+ * The number alone makes you do the comparison in your head; the rail does
+ * it for you. The span between the two marks *is* the disagreement, which is
+ * the thing this site refuses to hide.
+ */
+function reconciliationRail(reddit, google, combined) {
+    const W = 100, H = 38, pad = 4;
+    const x = (v) => pad + ((v + 1) / 2) * (W - pad * 2);
+    const y = 19;
+    const wrap = el("div", { class: "rail" });
+    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none",
+        role: "img", "aria-label": `Reddit ${fmt(reddit)}, reviews ${fmt(google)}, combined ${fmt(combined)}` });
+    svg.append(svgEl("line", { class: "axis", x1: pad, x2: W - pad, y1: y, y2: y }));
+    svg.append(svgEl("line", { class: "zero", x1: x(0), x2: x(0), y1: y - 9, y2: y + 9 }));
+    // The span between the sources, drawn before the marks so they sit on it.
+    svg.append(svgEl("line", { class: "span",
+        x1: Math.min(x(reddit), x(google)), x2: Math.max(x(reddit), x(google)),
+        y1: y, y2: y }));
+    svg.append(svgEl("circle", { class: "tick-a", cx: x(reddit), cy: y, r: 3.4 }));
+    svg.append(svgEl("circle", { class: "tick-b", cx: x(google), cy: y, r: 3.4 }));
+    // The combined figure is a diamond, so it never reads as a third source.
+    const d = svgEl("rect", { class: "combined", x: x(combined) - 3.6, y: y - 3.6,
+        width: 7.2, height: 7.2, rx: 1,
+        transform: `rotate(45 ${x(combined)} ${y})` });
+    svg.append(d);
+    for (const [v, label] of [[-1, "worse"], [1, "better"]]) {
+        const t = svgEl("text", { class: "scale-label", x: x(v), y: y + 15,
+            "text-anchor": v < 0 ? "start" : "end" });
+        t.textContent = label;
+        svg.append(t);
+    }
+    wrap.append(svg);
+    return wrap;
 }
 /* ── view: cross-check ──────────────────────────────────────────────── */
 /** Which Google population the reader chose: all ratings, or only the ones
@@ -855,6 +891,25 @@ function fillMethod() {
     for (const [k, v] of pairs)
         dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
 }
+/** Headline figures. Real counts from the payload, never rounded up. */
+function fillTally() {
+    const d = data();
+    const claims = Object.values(d.totals).reduce((a, t) => a + t.n, 0);
+    const items = Object.values(d.items).reduce((a, v) => a + Object.keys(v).length, 0);
+    const pairs = [
+        ["Stores ranked", String(Object.keys(d.stores).length)],
+        // `totals` is shopping-only, so this is the number that actually feeds
+        // a ranking — smaller than the number extracted, and the honest one to
+        // put on the front.
+        ["Claims weighed", claims.toLocaleString()],
+        ["Locations mapped", String(d.places.length)],
+        ["Items you can look up", items.toLocaleString()],
+    ];
+    const dl = need("#tally");
+    for (const [k, v] of pairs) {
+        dl.append(el("div", {}, [el("dt", { text: k }), el("dd", { text: v })]));
+    }
+}
 /** The Method page quotes real numbers rather than remembered ones. */
 function fillCalibrationProse() {
     const m = data().merged;
@@ -905,6 +960,7 @@ async function boot() {
     const corpus = data().corpus;
     need("#corpus-line").textContent =
         `${(corpus?.documents_extracted ?? 0).toLocaleString()} Reddit posts and comments`;
+    fillTally();
     const footer = need("#footer-line");
     footer.textContent = `Generated ${data().generated_at} · opinion aggregated from Reddit, not verified prices · `;
     footer.append(el("a", { href: "https://github.com/pelednoam/find-groceries" }, "source"));

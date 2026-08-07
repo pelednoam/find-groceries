@@ -73,6 +73,16 @@ setTimeout(() => {
   ok($("#cmp-cat").options.length > 15, "categories populated", $("#cmp-cat").options.length);
   ok($("#m-prov").children.length >= 18, "method provenance filled");
 
+  console.log("\n[identity]");
+  ok($(".mark") !== null && $(".brandname") !== null, "brand mark present");
+  ok($("h1 em") !== null, "headline has its accented phrase");
+  ok($("#tally").children.length === 4, "hero figures filled", $("#tally").children.length);
+  const figures = [...$$("#tally dd")].map(n => n.textContent);
+  ok(figures.every(t => /\d/.test(t)), "hero figures are real numbers", figures.join(" / "));
+  console.log("        " + [...$$("#tally div")].map(d =>
+    d.querySelector("dt").textContent + " " + d.querySelector("dd").textContent).join("  ·  "));
+  ok($$(".stages li").length === 4, "pipeline stages numbered", $$(".stages li").length);
+
   console.log("\n[shopping list]");
   $("#list-input").value = "milk\nchicken\nproduce\nbread\ncoffee\nbeer";
   click($("#list-go"));
@@ -203,6 +213,13 @@ setTimeout(() => {
   $("#store-pick").dispatchEvent(new window.Event("change"));
   ok($("#store-body .merged") !== null, "combined estimate shown on the store page");
   ok($("#store-body .mixbar") !== null, "the source mix is shown, not hidden");
+  const rail = $("#store-body .rail svg");
+  ok(rail !== null, "reconciliation rail drawn");
+  ok(rail.querySelectorAll("circle").length === 2, "one mark per source",
+     rail && rail.querySelectorAll("circle").length);
+  ok(rail.querySelector("rect.combined") !== null, "combined figure marked apart");
+  ok(/Reddit .*reviews .*combined/.test(rail.getAttribute("aria-label")),
+     "rail is described for screen readers", rail.getAttribute("aria-label"));
   const chainShare = $("#store-body .mixlab").textContent;
   ok(/9\d% of the weight/.test(chainShare),
      "Reddit dominates a well-evidenced chain", chainShare.slice(0, 60));
