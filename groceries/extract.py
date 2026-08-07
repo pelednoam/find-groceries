@@ -103,6 +103,9 @@ text that merely names a store as a landmark, asks a question without answering 
 discusses something unrelated to shopping there.
 - `store` must be one of the listed names, or "other" if the text evaluates a grocery \
 store not on the list. Never map a claim onto a listed store because it seems similar.
+- "other" requires an *identifiable* store the text actually names. A complaint about \
+"this place" or "the store near me", where the text never says which store, is not a \
+claim about "other" — it is unusable, so return nothing for it.
 - `claim` is a single self-contained sentence in your own words, understandable without \
 the original text. Include the specific detail (the item, the price, the comparison) \
 rather than a generic summary.
@@ -173,7 +176,11 @@ Return an empty list for text like these:
 - "Market Basket treats its employees well." — this IS a claim, but categorise it
   as labor_ethics; it is not about the groceries.
 - "The Wegmans is a mile away and I'd need a car." — about the writer's geography,
-  not the store. Return nothing for this."""
+  not the store. Return nothing for this.
+- "The produce here spoils so fast, I'm done with this place. Gonna have to trek to
+  Trader Joe's now." — the complaint is about a store the text never names, so it is
+  not a claim about "other"; and naming Trader Joe's as the fallback is not praise
+  for Trader Joe's. Return nothing for either half."""
 
 SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
