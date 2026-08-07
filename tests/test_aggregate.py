@@ -198,6 +198,29 @@ class TestValidation:
         assert not aggregate._is_valid({**claim(), "created_utc": 10**18})
         assert not aggregate._is_valid({**claim(), "created_utc": 0})
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("score", "12"), ("score", True), ("transient", "yes"),
+            ("location", 5), ("item", []), ("comparator_store", None),
+            ("author", 7),
+        ],
+    )
+    def test_rejects_fields_that_crash_the_maths(self, field: str, value: Any) -> None:
+        """`location` reaches `.strip()` and `score` reaches a numeric
+        comparison, so a bad value there was a crash at the trust boundary
+        rather than a rejected row."""
+        assert not aggregate._is_valid({**claim(), field: value})
+
+    @pytest.mark.parametrize("field", ["location", "item", "comparator_store", "author"])
+    def test_absent_optional_fields_are_fine(self, field: str) -> None:
+        row = dict(claim())
+        row.pop(field)
+        assert aggregate._is_valid(row)
+
+    def test_a_null_score_is_allowed(self) -> None:
+        assert aggregate._is_valid({**claim(), "score": None})
+
     def test_rejects_bool_timestamp(self) -> None:
         assert not aggregate._is_valid({**claim(), "created_utc": True})
 
@@ -306,16 +329,46 @@ class TestIndependenceCaps:
         ]
         assert len(aggregate.limit_per_source(many)) == 4
 
-    @pytest.mark.parametrize("author", ["", "[deleted]", "[removed]", "AutoModerator"])
+    @pytest.mark.parametrize("author", ["", "[deleted]", "[removed]"])
     def test_anonymous_authors_are_not_capped_together(self, author: str) -> None:
         many = [claim(author=author, source_key=f"c_boston_{i}") for i in range(5)]
         assert len(aggregate.limit_per_source(many)) == 5
+
+    def test_automoderator_is_capped_like_anyone_else(self) -> None:
+        # It is exactly one prolific poster, which is what the cap is for.
+        many = [
+            claim(author="AutoModerator", source_key=f"c_boston_{i}")
+            for i in range(5)
+        ]
+        assert (
+            len(aggregate.limit_per_source(many))
+            == aggregate.MAX_CLAIMS_PER_AUTHOR_CELL
+        )
 
     def test_higher_confidence_survives_the_cap(self) -> None:
         mixed = [claim(confidence="low", claim=f"lo{i}") for i in range(3)] + [
             claim(confidence="high", claim="hi")
         ]
         assert "hi" in [c["claim"] for c in aggregate.limit_per_source(mixed)]
+
+
+class TestPrepare:
+    def test_transient_claims_are_dropped_before_the_caps(self) -> None:
+        """Filtering them inside `build`, after the caps, let three
+        closing-down-sale claims fill a document's cap and starve the durable
+        claim in the same comment."""
+        one_doc = [
+            claim(claim="sale1", transient=True, category="deals_loyalty"),
+            claim(claim="sale2", transient=True, category="price_overall"),
+            claim(claim="sale3", transient=True, category="quality_overall"),
+            claim(claim="durable", category="produce"),
+        ]
+        kept = [c["claim"] for c in aggregate.prepare(one_doc)]
+        assert "durable" in kept
+        assert not any(k.startswith("sale") for k in kept)
+
+    def test_transient_can_be_kept_explicitly(self) -> None:
+        assert len(aggregate.prepare([claim(transient=True)], False)) == 1
 
 
 class TestBuild:
@@ -330,7 +383,35 @@ class TestBuild:
         cells, _ = aggregate.build(
             [claim(location="Somerville"), claim(location="Chelsea", claim="x")], NOW
         )
-        assert {k[1] for k in cells} == {"Somerville", "Chelsea"}
+        assert {k[1] for k in cells} == {"somerville", "chelsea"}
+
+    def test_spelling_variants_are_one_branch(self) -> None:
+        """Unconstrained model prose used as a dict key fragments a branch
+        into several, each individually too thin to clear the threshold."""
+        variants = ["Somerville", "somerville", " Somerville ", "Somerville, MA",
+                    "the Somerville one", "Somerville  store"]
+        cells, _ = aggregate.build(
+            [claim(location=v, claim=f"c{i}") for i, v in enumerate(variants)], NOW
+        )
+        assert len(cells) == 1
+        assert next(iter(cells)).__getitem__(1) == "somerville"
+        assert next(iter(cells.values())).n == 6
+
+    def test_the_readable_spelling_survives_normalisation(self) -> None:
+        cells, _ = aggregate.build(
+            [claim(location="Somerville"), claim(location="somerville", claim="x")],
+            NOW,
+        )
+        assert next(iter(cells.values())).label() == "Somerville"
+
+    def test_item_variants_are_one_entry(self) -> None:
+        _, items = aggregate.build(
+            [claim(item="Key Limes", category="specific_item"),
+             claim(item="key limes", category="specific_item", claim="x")],
+            NOW,
+        )
+        assert list(items) == ["Market Basket|key limes"]
+        assert items["Market Basket|key limes"].label() == "Key Limes"
 
     def test_items_are_indexed_separately(self) -> None:
         _, items = aggregate.build(

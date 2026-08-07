@@ -60,12 +60,22 @@ def triples(claims: Iterable[ClaimLike]) -> set[Triple]:
     return {(c["store"], c["category"], c["sentiment"]) for c in claims}
 
 
-def flags(claims: Iterable[ClaimLike]) -> dict[Triple, tuple[bool, str]]:
-    """Index the unscored-but-consequential fields by the triple they belong to."""
+Flags = tuple[bool, str, str]  # transient, comparator_store, price_signal
+
+
+def flags(claims: Iterable[ClaimLike]) -> dict[Triple, Flags]:
+    """Index the consequential non-triple fields by the triple they belong to.
+
+    `price_signal` belongs here, not nowhere: it is the sole input to stage
+    3's entire ordinal price index. Leaving it unscored let the evaluator
+    report exact agreement on a run that would have told the reader Whole
+    Foods was cheap.
+    """
     return {
         (c["store"], c["category"], c["sentiment"]): (
             bool(c.get("transient", False)),
             str(c.get("comparator_store", "")),
+            str(c.get("price_signal", "none")),
         )
         for c in claims
     }
@@ -95,8 +105,8 @@ class CaseResult:
     expected: set[Triple]
     got: set[Triple]
     error: str | None = None
-    expected_flags: dict[Triple, tuple[bool, str]] = field(default_factory=dict)
-    got_flags: dict[Triple, tuple[bool, str]] = field(default_factory=dict)
+    expected_flags: dict[Triple, Flags] = field(default_factory=dict)
+    got_flags: dict[Triple, Flags] = field(default_factory=dict)
 
     @property
     def missed(self) -> set[Triple]:
@@ -110,7 +120,7 @@ class CaseResult:
     def matched(self) -> set[Triple]:
         return self.expected & self.got
 
-    def flag_disagreements(self) -> list[tuple[Triple, tuple[bool, str], tuple[bool, str]]]:
+    def flag_disagreements(self) -> list[tuple[Triple, Flags, Flags]]:
         return [
             (t, self.expected_flags[t], self.got_flags[t])
             for t in sorted(self.matched)
@@ -150,9 +160,15 @@ class Score:
     def errors(self) -> int:
         return sum(1 for c in self.cases if c.error)
 
-    def precision(self) -> float:
+    def precision(self) -> float | None:
+        """None, not 1.0, when the extractor emitted nothing at all.
+
+        A run that returns zero claims has not achieved perfect precision; it
+        has produced no evidence about precision. Printing 1.00 there is the
+        single most flattering way to report a total failure.
+        """
         denom = self.true_positives + self.false_positives
-        return self.true_positives / denom if denom else 1.0
+        return self.true_positives / denom if denom else None
 
     def recall(self) -> float:
         denom = self.true_positives + self.false_negatives
@@ -160,6 +176,8 @@ class Score:
 
     def f1(self) -> float:
         p, r = self.precision(), self.recall()
+        if p is None:
+            return 0.0
         return 2 * p * r / (p + r) if p + r else 0.0
 
     def exact_match(self) -> float:
@@ -170,21 +188,26 @@ class Score:
             else 1.0
         )
 
-    def flag_accuracy(self) -> float:
-        """Agreement on `transient`/`comparator_store`, over matched claims."""
+    def flag_accuracy(self) -> float | None:
+        """Agreement on transient / comparator_store / price_signal."""
         matched = sum(len(c.matched) for c in self.cases)
         wrong = sum(len(c.flag_disagreements()) for c in self.cases)
-        return (matched - wrong) / matched if matched else 1.0
+        return (matched - wrong) / matched if matched else None
 
-    def silence_accuracy(self) -> float:
+    def silence_accuracy(self) -> float | None:
         """How often the extractor correctly finds nothing.
 
         Broken out because it is the single easiest metric to lose: a model
         nudged toward productivity scores well on documents that do support a
         claim and floods the aggregate from the ones that do not.
+
+        Errored cases are excluded, not counted as silence. A case that threw
+        also produced no claims, and crediting that as a correct "found
+        nothing" turns a broken run into a perfect score on the one metric
+        this eval exists to protect.
         """
-        quiet = [c for c in self.cases if not c.expected]
-        return sum(1 for c in quiet if not c.got) / len(quiet) if quiet else 1.0
+        quiet = [c for c in self.cases if not c.expected and c.error is None]
+        return sum(1 for c in quiet if not c.got) / len(quiet) if quiet else None
 
 
 def read_gold(path: Path) -> list[GoldCase]:
@@ -214,15 +237,20 @@ def evaluate(extractor: Extractor, cases: Sequence[GoldCase]) -> Score:
     return Score([score_one(extractor, case) for case in cases])
 
 
+def pct(value: float | None) -> str:
+    """Render a metric, distinguishing "perfect" from "no evidence"."""
+    return "n/a" if value is None else f"{value:.0%}"
+
+
 def format_score(score: Score) -> str:
     lines = [
         f"cases            {len(score.cases)}",
-        f"exact match      {score.exact_match():.0%}",
-        f"precision        {score.precision():.2f}",
-        f"recall           {score.recall():.2f}",
+        f"exact match      {pct(score.exact_match())}",
+        f"precision        {pct(score.precision())}",
+        f"recall           {pct(score.recall())}",
         f"f1               {score.f1():.2f}",
-        f"correct silence  {score.silence_accuracy():.0%}",
-        f"flag agreement   {score.flag_accuracy():.0%}",
+        f"correct silence  {pct(score.silence_accuracy())}",
+        f"flag agreement   {pct(score.flag_accuracy())}",
     ]
     if score.errors:
         lines.append(f"errors           {score.errors}")
@@ -242,14 +270,18 @@ def format_score(score: Score) -> str:
     return "\n".join(lines)
 
 
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 4)
+
+
 def write_report(score: Score, path: Path) -> None:
     payload = {
-        "exact_match": round(score.exact_match(), 4),
-        "precision": round(score.precision(), 4),
-        "recall": round(score.recall(), 4),
+        "exact_match": _round(score.exact_match()),
+        "precision": _round(score.precision()),
+        "recall": _round(score.recall()),
         "f1": round(score.f1(), 4),
-        "silence_accuracy": round(score.silence_accuracy(), 4),
-        "flag_accuracy": round(score.flag_accuracy(), 4),
+        "silence_accuracy": _round(score.silence_accuracy()),
+        "flag_accuracy": _round(score.flag_accuracy()),
         "errors": score.errors,
         "cases": [
             {

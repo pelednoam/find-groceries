@@ -86,7 +86,22 @@ class TestSelectCLI:
             ["--corpus", str(tmp_path / "corpus"), "--out", str(tmp_path / "ws.jsonl")]
         )
         assert code == 1
-        assert "refusing to call this a success" in capsys.readouterr().out
+        assert "refusing to overwrite" in capsys.readouterr().out
+
+    def test_an_empty_result_leaves_the_previous_working_set_intact(
+        self, tmp_path: Path
+    ) -> None:
+        """The write is atomic, so writing straight to --out replaced a good
+        working set with an empty one and only *then* reported failure."""
+        write_shard(tmp_path / "corpus", "boston", ["nothing of interest here at all"])
+        out = tmp_path / "ws.jsonl"
+        out.write_text('{"id": "keep-me"}\n', encoding="utf-8")
+        code = select_evaluative.main(
+            ["--corpus", str(tmp_path / "corpus"), "--out", str(out)]
+        )
+        assert code == 1
+        assert "keep-me" in out.read_text()
+        assert not out.with_suffix(out.suffix + ".staged").exists()
 
     def test_report_handles_a_zero_document_scan(self) -> None:
         from groceries.select import SelectionReport
@@ -230,23 +245,38 @@ class TestAggregateCLI:
         ws, done = tmp_path / "ws.jsonl", tmp_path / "done.txt"
         ws.write_text("a\nb\n\nc\n", encoding="utf-8")
         done.write_text("k1\nk2\n", encoding="utf-8")
+        claims = tmp_path / "claims.jsonl"
+        claims.touch()
         monkeypatch.setattr(aggregate_claims, "WORKING_SET", ws)
         monkeypatch.setattr(aggregate_claims, "DONE", done)
-        got = aggregate_claims.corpus_provenance(tmp_path / "claims.jsonl")
-        assert got == {
+        monkeypatch.setattr(aggregate_claims, "CLAIMS", claims)
+        assert aggregate_claims.corpus_provenance(claims) == {
             "claims_file": "claims.jsonl",
             "working_set": 3,
             "documents_extracted": 2,
         }
 
+    def test_pipeline_counts_are_not_claimed_for_a_custom_claims_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asserting a provenance the file does not have is worse than none."""
+        ws = tmp_path / "ws.jsonl"
+        ws.write_text("a\nb\n", encoding="utf-8")
+        monkeypatch.setattr(aggregate_claims, "WORKING_SET", ws)
+        monkeypatch.setattr(aggregate_claims, "CLAIMS", tmp_path / "claims.jsonl")
+        got = aggregate_claims.corpus_provenance(tmp_path / "hand-picked.jsonl")
+        assert "working_set" not in got
+        assert "not applicable" in str(got["note"])
+
     def test_corpus_provenance_omits_files_that_do_not_exist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        claims = tmp_path / "c.jsonl"
+        claims.touch()
         monkeypatch.setattr(aggregate_claims, "WORKING_SET", tmp_path / "nope.jsonl")
         monkeypatch.setattr(aggregate_claims, "DONE", tmp_path / "nope.txt")
-        assert aggregate_claims.corpus_provenance(tmp_path / "c.jsonl") == {
-            "claims_file": "c.jsonl"
-        }
+        monkeypatch.setattr(aggregate_claims, "CLAIMS", claims)
+        assert aggregate_claims.corpus_provenance(claims) == {"claims_file": "c.jsonl"}
 
 
 class TestEvaluateCLI:

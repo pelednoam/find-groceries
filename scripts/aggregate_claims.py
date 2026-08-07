@@ -30,8 +30,15 @@ def corpus_provenance(claims_path: Path) -> dict[str, object]:
     Without this the output is a set of confident numbers with no way to tell
     whether they came from the full corpus or from a 150-document calibration
     sample — a distinction that changes how much any of them is worth.
+
+    The working-set and done-file counts describe the *default* pipeline run.
+    Attaching them to a hand-picked `--claims` file would assert a provenance
+    that file does not have, which is worse than recording none.
     """
     provenance: dict[str, object] = {"claims_file": claims_path.name}
+    if claims_path.resolve() != CLAIMS.resolve():
+        provenance["note"] = "custom claims file; pipeline counts not applicable"
+        return provenance
     for label, path in (("working_set", WORKING_SET), ("documents_extracted", DONE)):
         if path.exists():
             with path.open(encoding="utf-8") as fh:

@@ -234,6 +234,53 @@ class TestEvaluate:
         assert cand is not None
         assert len(cand["parent_body"]) == select.PARENT_CONTEXT_CHARS
 
+    def test_a_direct_match_never_advertises_an_unseen_store(self) -> None:
+        """The old `matched_stores(body) or stores` fallback told the model a
+        store was matched in text it could not see -- exactly the invitation
+        to invent a claim that recomputing `visible` exists to prevent."""
+        raw = self._raw("Market Basket is cheapest. " + ("x" * select.MAX_CHARS))
+        cand = select.evaluate(raw, "boston", "comments")
+        assert cand is not None
+        assert set(cand["stores"]) <= set(select.matched_stores(cand["text"]))
+
+    def test_a_windowed_excerpt_that_loses_its_store_is_dropped(self) -> None:
+        """A context-gated store can match the full text and then fail inside
+        the window, because the food words that licensed it fell outside.
+        Sending it anyway would name a store the model cannot see."""
+        text = ("Target had the best prices. " + "filler about nothing. " * 400
+                + " I bought milk and eggs there.")
+        assert "Target" in select.matched_stores(text)
+        assert select.make_candidate(
+            {"id": "x", "created_utc": 1}, "boston", "comments", ["Target"], text
+        ) is None
+
+    def test_a_dropped_candidate_never_reaches_the_working_set(self) -> None:
+        text = ("Target had the best prices. " + "filler about nothing. " * 400
+                + " I bought milk and eggs there.")
+        raw: RawDoc = {"id": "x", "created_utc": 1, "body": text, "link_id": "t3_p"}
+        assert select.evaluate(raw, "boston", "comments") is None
+
+    def test_casefold_preserving_does_not_change_length(self) -> None:
+        # "İ".lower() is two characters, which slid the excerpt window.
+        for s in ["İstanbul Market", "ABC", "\u0130\u0130\u0130", "ﬁsh"]:
+            assert len(select.casefold_preserving(s)) == len(s)
+
+    def test_casefold_preserving_still_lowercases(self) -> None:
+        assert select.casefold_preserving("Market BASKET") == "market basket"
+
+    def test_first_mention_survives_an_expanding_character(self) -> None:
+        text = "\u0130\u0130\u0130 Market Basket is cheap"
+        assert text[select.first_mention(text, ["Market Basket"]):].startswith(
+            "Market Basket"
+        )
+
+    def test_a_direct_match_carries_no_parent_context(self) -> None:
+        # A second span of untrusted text, paid for on ~10,000 documents, to
+        # resolve a referent the reply already names.
+        raw = self._raw("Market Basket has the cheapest produce anywhere")
+        cand = select.evaluate(raw, "boston", "comments", parent_body="Aldi is fine.")
+        assert cand is not None and cand["parent_body"] == ""
+
     def test_first_mention_offset(self) -> None:
         assert select.first_mention("xx Aldi", ["Aldi"]) == 3
         assert select.first_mention("nothing here", ["Aldi"]) == 0

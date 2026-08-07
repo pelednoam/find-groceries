@@ -75,7 +75,23 @@ EVALUATIVE: re.Pattern[str] = re.compile(
     r"sucks?|sucked|trash|garbage|crap|crappy|gross|disgusting|nasty|filthy|"
     r"dirty|horrible|mediocre|disappointing|never again|dumpster|"
     r"awesome|amazing|love|favorite|favourite|go[\s-]?to|solid|spectacular|"
-    r"overrated|underrated|steal|pricier|dollars?|bucks?)\b|\$\d",
+    r"overrated|underrated|steal|pricier|dollars?|bucks?|"
+    # Stage 2 gained delivery_online, crowding_hours, store_lifecycle,
+    # labor_ethics and parking_access, and stage 3 gained a half-life for
+    # each -- but the gate here had no vocabulary for any of them, so no
+    # document that only discusses one was ever selected. The categories
+    # existed downstream of a filter that could not feed them.
+    r"deliver(?:y|ed|ies)|instacart|curbside|pickup|shipt|doordash|"
+    r"coupons?|loyalty|rewards|discounts?|clearance|markdowns?|"
+    r"crowded|packed|mobbed|busy|lines|queues?|madhouse|"
+    # Bare "open" and "union" are not usable here: "are they open late" is a
+    # question, and Union Square is a neighbourhood in two of the three
+    # subreddits. Same for bare "lot" ("a lot of") and singular "line".
+    r"opened|opening|reopen(?:ed|ing)?|clos(?:ing|ed|es|ure)|"
+    r"renovat(?:e|ed|ion|ing)|remodel(?:ed|ing)?|"
+    r"unioniz(?:e|ed|ing|ation)|strike|wages?|employees?|workers?|staff|"
+    # "parking" already covers "parking garage"; bare "garage" is a place.
+    r"parking|validat(?:e|ed|ion))\b|\$\d",
 )
 
 BOT_AUTHORS: frozenset[str] = frozenset(
@@ -134,6 +150,17 @@ def permalink(raw: RawDoc, subreddit: str, kind: str) -> str:
     return f"/r/{subreddit}/comments/{link}/_/{raw['id']}/"
 
 
+def casefold_preserving(text: str) -> str:
+    """Lowercase without changing the length of the string.
+
+    `str.lower` expands some characters -- "İ" becomes two -- which silently
+    invalidates any offset computed on the result and used against the
+    original. Characters that would expand are left alone: they are never
+    part of a store name, so folding them buys nothing.
+    """
+    return "".join(c if len(c.lower()) != 1 else c.lower() for c in text)
+
+
 def matched_stores(text: str) -> list[str]:
     """Store names the text mentions, after context-gating generic words.
 
@@ -155,10 +182,16 @@ def is_evaluative(text: str) -> bool:
 
 
 def first_mention(text: str, stores: Iterable[str]) -> int:
-    """Character offset of the earliest mention of any of `stores`."""
-    lowered = text.lower()
+    """Character offset of the earliest mention of any of `stores`.
+
+    Offsets come from `str.casefold`, which is length-preserving for the
+    characters that appear here; `str.lower` is not -- "İ".lower() is two
+    characters -- and an offset taken from lowered text and applied to the
+    original slides the excerpt window by one per such character.
+    """
+    folded = casefold_preserving(text)
     starts = [
-        m.start() for store in stores if (m := STORES[store].search(lowered)) is not None
+        m.start() for store in stores if (m := STORES[store].search(folded)) is not None
     ]
     return min(starts, default=0)
 
@@ -187,14 +220,26 @@ def make_candidate(
     stores: list[str],
     text: str,
     parent_body: str = "",
-) -> Candidate:
+    inherited: bool = False,
+) -> Candidate | None:
+    """Assemble a Candidate. `inherited` means the store came from the parent.
+
+    That flag has to be explicit. The previous `matched_stores(body) or stores`
+    conflated two cases: an inherited referent, where the excerpt legitimately
+    names no store, and a *directly* matched document whose excerpt lost its
+    store to windowing -- where falling back to `stores` tells the model a
+    store was matched in text it cannot see, which is exactly the invitation
+    to invent a claim the recomputation exists to prevent.
+    """
     body, truncated = excerpt(text, stores)
-    # Recomputed against the text actually sent: the prompt names these as
-    # pre-filter matches, and advertising a store the model cannot see is an
-    # invitation to invent a claim about it.
-    # When the store is only named by the parent, the excerpt legitimately
-    # contains none -- keep the inherited list rather than emptying it.
-    visible = matched_stores(body) or stores
+    visible = stores if inherited else matched_stores(body)
+    # A context-gated store ("Target", "Haymarket") can match the full text
+    # and then fail inside the window, because the food words that licensed
+    # it fell outside. Send nothing rather than a document whose prompt
+    # claims a store the model cannot see -- that is the invitation to
+    # invent a claim that recomputing `visible` exists to prevent.
+    if not visible:
+        return None
     return Candidate(
         id=raw["id"],
         subreddit=subreddit,
@@ -234,7 +279,11 @@ def evaluate(
         return None
 
     if may_mention_store(text.lower()) and (stores := matched_stores(text)):
-        return make_candidate(raw, subreddit, kind, stores, text, parent_body)
+        # No parent context here on purpose. The reply names its own store, so
+        # the parent adds nothing to resolve -- and it is a second span of
+        # untrusted text in the prompt, paid for on every one of ~10,000
+        # documents, to no end.
+        return make_candidate(raw, subreddit, kind, stores, text)
 
     # Inherited referent: the reply carries the judgement, the parent names
     # the store. Require grocery context so unrelated replies don't ride along.
@@ -243,7 +292,9 @@ def evaluate(
     parent_stores = matched_stores(parent_body)
     if len(parent_stores) != 1:
         return None
-    return make_candidate(raw, subreddit, kind, parent_stores, text, parent_body)
+    return make_candidate(
+        raw, subreddit, kind, parent_stores, text, parent_body, inherited=True
+    )
 
 
 def parent_index(rows: list[RawDoc]) -> dict[str, str]:

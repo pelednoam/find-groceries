@@ -133,6 +133,13 @@ claim only weakly. It measures how well the text backs the claim, never how sure
 are of the underlying fact.
 - Sarcasm and jokes are common. Judge the intended meaning, not the literal words.
 - Text may be years old. Extract what it says; the pipeline records the date separately.
+- Only claims that bear on buying groceries. These stores sell tyres, petrol, \
+pharmacy items and furniture; a claim about those is real but is not what the reader \
+is asking, so return nothing for it.
+- `store_lifecycle` covers openings, closures, renovations and ownership changes that \
+actually happened or are scheduled. A proposal, rumour or abandoned plan is not one.
+- Prefer `prepared_food` over `specific_item` for anything the store makes or serves \
+itself (pizza, rotisserie chicken, sandwiches), even when one dish is named.
 
 Categories:
 - produce, meat, seafood, dairy, bakery, frozen, pantry, alcohol: the claim is about
@@ -235,7 +242,10 @@ def fence(doc: Candidate) -> str:
     that — an author cannot embed the hash of their own text inside it,
     because doing so changes the hash.
     """
-    material = f"{doc['parent_body']}\0{doc['text']}".encode()
+    # surrogatepass, not the default strict: Reddit JSON carries lone
+    # surrogates from \\ud800-style escapes, and a UnicodeEncodeError here
+    # would fail the document at the last step before the paid request.
+    material = f"{doc['parent_body']}\0{doc['text']}".encode(errors="surrogatepass")
     return f"DOC-{hashlib.sha256(material).hexdigest()[:16].upper()}"
 
 

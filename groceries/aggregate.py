@@ -27,7 +27,7 @@ import json
 import math
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from operator import itemgetter
@@ -68,15 +68,19 @@ MAX_CLAIMS_PER_DOCUMENT: Final = 3
 # One opinionated regular over eight years is not many independent opinions.
 MAX_CLAIMS_PER_AUTHOR_CELL: Final = 2
 POSITIVE_THRESHOLD: Final = 0.15
+# Below this much price evidence, shrinkage dominates and every cell reads
+# "fair" regardless of what it says. Emit nothing rather than a wrong label.
+MIN_PRICE_WEIGHT: Final = 1.0
 # Roughly one low-confidence claim from this decade. Below that a cell is one
 # person's passing remark, and printing a number for it implies more.
 DEFAULT_MIN_WEIGHT: Final = 0.3
 MIN_TIMESTAMP: Final = 1_100_000_000  # ~2004; Reddit did not exist before this
 # Placeholders the dumps use for accounts that no longer exist. Capping these
 # together would treat every deleted account in the corpus as one person.
-ANONYMOUS_AUTHORS: Final[frozenset[str]] = frozenset(
-    {"", "[deleted]", "[removed]", "AutoModerator"}
-)
+# AutoModerator is deliberately NOT here: it is exactly one prolific poster,
+# which is what the cap is for. (Stage 1's BOT_AUTHORS drops it earlier
+# anyway; exempting it here stated the opposite rule in the same codebase.)
+ANONYMOUS_AUTHORS: Final[frozenset[str]] = frozenset({"", "[deleted]", "[removed]"})
 
 CellKey = tuple[str, str, str]  # store, location, category
 
@@ -88,16 +92,62 @@ STRING_FIELDS: Final[tuple[str, ...]] = (
     "store", "category", "claim", "sentiment", "confidence", "source_key",
     "permalink",
 )
+# Absent is fine (an older claims file predates them); present-but-wrong-typed
+# is not. `location` reaches `.strip()` in `build` and `score` reaches a
+# numeric comparison in `vote_weight`, so a bad value there is a crash at the
+# trust boundary rather than a rejected row.
+OPTIONAL_STRING_FIELDS: Final[tuple[str, ...]] = (
+    "location", "item", "comparator_store", "author",
+)
 # C0/C1/DEL, bidi overrides, and zero-width formatting. Newline and tab go too:
 # these render into a terminal and into one-line table cells.
+UNSAFE_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x0000, 0x001F),  # C0 controls, including ESC, newline and tab
+    (0x007F, 0x009F),  # DEL and the C1 controls
+    (0x00AD, 0x00AD),  # soft hyphen
+    (0x061C, 0x061C),  # Arabic letter mark
+    (0x180E, 0x180E),  # Mongolian vowel separator
+    (0x200B, 0x200F),  # zero-width space/joiners, LRM, RLM
+    (0x2028, 0x2029),  # line and paragraph separators
+    (0x202A, 0x202E),  # bidi embedding and override
+    (0x2060, 0x2064),  # word joiner and the invisible operators
+    (0x2066, 0x2069),  # bidi isolates
+    (0xD800, 0xDFFF),  # lone surrogates: unencodable, never legitimate here
+    (0xFEFF, 0xFEFF),  # zero-width no-break space / BOM
+    (0xFFF9, 0xFFFB),  # interlinear annotation
+)
+# Built from the table rather than written as a literal: the previous version
+# spelled these as the invisible characters themselves, so the pattern could
+# not be reviewed by reading it and a missing class -- U+2028/U+2029, exactly
+# the "hide the rest of the line" case -- went unnoticed.
 UNSAFE_TEXT: Final = re.compile(
-    "[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩﻿]"
+    "[" + "".join(f"\\u{lo:04x}-\\u{hi:04x}" for lo, hi in UNSAFE_RANGES) + "]"
 )
 
 
 def scrub(value: str) -> str:
     """Remove characters that can rewrite a terminal or hide text."""
     return UNSAFE_TEXT.sub("", value)
+
+
+def normalise(value: str) -> str:
+    """Fold free text into a stable key.
+
+    `location` and `item` are unconstrained model prose used as dictionary
+    keys, so "Somerville", "somerville" and "Somerville " were three separate
+    branches of the same store, each individually too thin to clear the
+    evidence threshold.
+    """
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def branch_key(location: str) -> str:
+    """Normalise a branch name, dropping the noise suffixes the model adds."""
+    key = normalise(location)
+    # "Somerville, MA" and "the Somerville one" are the same branch.
+    key = re.sub(r"^the\s+", "", key)
+    key = re.sub(r"\s+(one|store|location)$", "", key)
+    return re.sub(r",?\s*(ma|mass|massachusetts)$", "", key).strip()
 
 
 def half_life_for(category: str) -> float:
@@ -143,6 +193,13 @@ class Cell:
     price_weight: float = 0.0
     price_counts: dict[str, int] = field(default_factory=dict)
     examples: list[tuple[float, SourcedClaim]] = field(default_factory=list)
+    # Cells are keyed on a casefolded name so spelling variants merge, but
+    # the reader should see "Somerville", not "somerville".
+    labels: Counter[str] = field(default_factory=Counter)
+
+    def label(self, fallback: str = "") -> str:
+        common = self.labels.most_common(1)
+        return common[0][0] if common else fallback
 
     def add(self, claim: SourcedClaim, weight: float) -> None:
         self.n += 1
@@ -173,8 +230,16 @@ class Cell:
         return self.price_score / (self.price_weight + SHRINKAGE_K)
 
     def price_label(self) -> str | None:
+        """cheap / fair / expensive, or None when the evidence cannot say.
+
+        "fair" must mean "the evidence says middling", never "there is not
+        enough evidence to tell". Shrinkage pulls a thin cell toward 0, so
+        without a floor a single "cheap" claim at weight 0.3 lands at -0.13
+        and gets printed as "fair" -- the opposite of what the one person who
+        commented actually said.
+        """
         level = self.price_level()
-        if level is None:
+        if level is None or self.price_weight < MIN_PRICE_WEIGHT:
             return None
         if level < -POSITIVE_THRESHOLD:
             return "cheap"
@@ -215,6 +280,15 @@ def _is_valid(row: Any) -> bool:
     # An out-of-range int passes isinstance and then raises inside time.gmtime,
     # so bound it here rather than at the formatter.
     if not MIN_TIMESTAMP <= ts <= int(time.time()) + SECONDS_PER_YEAR:
+        return False
+    score = row.get("score")
+    if score is not None and (not isinstance(score, int) or isinstance(score, bool)):
+        return False
+    if not isinstance(row.get("transient", False), bool):
+        return False
+    if any(
+        f in row and not isinstance(row[f], str) for f in OPTIONAL_STRING_FIELDS
+    ):
         return False
     return all(isinstance(row.get(f), str) for f in STRING_FIELDS)
 
@@ -288,17 +362,27 @@ def limit_per_source(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
     Highest-confidence claims are kept: the cap should discard the weakest
     part of a prolific poster's contribution, not an arbitrary part of it.
     """
-    per_doc: dict[str, int] = defaultdict(int)
+    per_doc: dict[tuple[str, str], int] = defaultdict(int)
     per_author: dict[CellKey, int] = defaultdict(int)
     out: list[SourcedClaim] = []
     ordered = sorted(
         claims,
-        key=lambda c: -CONFIDENCE_WEIGHT.get(
-            c.get("confidence", ""), DEFAULT_CONFIDENCE_WEIGHT
+        key=lambda c: (
+            -CONFIDENCE_WEIGHT.get(
+                c.get("confidence", ""), DEFAULT_CONFIDENCE_WEIGHT
+            ),
+            # Break ties toward recent evidence rather than toward file order,
+            # so the cap is deterministic and drops the stalest claims.
+            -c["created_utc"],
+            c["source_key"],
+            c["claim"],
         ),
     )
     for claim in ordered:
-        doc = claim["source_key"]
+        # Per (document, store), not per document. A comment comparing five
+        # stores is five observations, not one; capping globally discarded
+        # evidence about stores the writer had said only one thing about.
+        doc = (claim["source_key"], claim["store"])
         if per_doc[doc] >= MAX_CLAIMS_PER_DOCUMENT:
             continue
         # Deleted and suppressed accounts are not one prolific poster.
@@ -314,9 +398,20 @@ def limit_per_source(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
     return out
 
 
-def prepare(claims: Iterable[SourcedClaim]) -> list[SourcedClaim]:
-    """Everything that must happen before anything is counted."""
-    return limit_per_source(collapse_reciprocals(dedupe(claims)))
+def prepare(
+    claims: Iterable[SourcedClaim], exclude_transient: bool = True
+) -> list[SourcedClaim]:
+    """Everything that must happen before anything is counted.
+
+    Transient claims are dropped *first*. Filtering them inside `build`, after
+    the caps, let three closing-down-sale claims fill a document's cap and
+    starve the durable claim in the same comment -- the evidence was discarded
+    by a rule that was then itself discarded.
+    """
+    rows: Iterable[SourcedClaim] = dedupe(claims)
+    if exclude_transient:
+        rows = [c for c in rows if not c.get("transient")]
+    return limit_per_source(collapse_reciprocals(rows))
 
 
 def build(
@@ -331,11 +426,16 @@ def build(
         weight = claim_weight(claim, now)
         if claim.get("_reciprocal"):
             weight *= 0.5
-        location = claim.get("location", "").strip()
-        cells[(claim["store"], location, claim["category"])].add(claim, weight)
-        item = claim.get("item", "").strip().lower()
+        location = branch_key(claim.get("location", ""))
+        cell = cells[(claim["store"], location, claim["category"])]
+        cell.add(claim, weight)
+        if location:
+            cell.labels[claim["location"].strip()] += 1
+        item = normalise(claim.get("item", ""))
         if item:
-            items[f"{claim['store']}|{item}"].add(claim, weight)
+            index = items[f"{claim['store']}|{item}"]
+            index.add(claim, weight)
+            index.labels[claim["item"].strip()] += 1
     return dict(cells), dict(items)
 
 
@@ -424,7 +524,8 @@ def aggregate(
     for (store, location, category), cell in cells.items():
         if not location or cell.weight < min_weight:
             continue
-        branches.setdefault(store, {}).setdefault(location, {})[category] = _cell_view(
+        name = cell.label(location)
+        branches.setdefault(store, {}).setdefault(name, {})[category] = _cell_view(
             cell, max_examples
         )
 
@@ -433,7 +534,7 @@ def aggregate(
         if cell.weight < min_weight:
             continue
         store, item = key.split("|", 1)
-        item_index.setdefault(store, {})[item] = _cell_view(cell, 2)
+        item_index.setdefault(store, {})[cell.label(item)] = _cell_view(cell, 2)
 
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)),

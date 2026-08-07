@@ -63,16 +63,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"available: {', '.join(sorted(available))}")
             return 2
 
+    # Write to a staging path first. `write_candidates` publishes atomically,
+    # so writing straight to --out replaced a good working set with an empty
+    # one and only *then* reported failure — the destructive half of the
+    # operation had already committed.
+    staged = args.out.with_suffix(args.out.suffix + ".staged")
     report = SelectionReport()
     n = write_candidates(
         iter_candidates(shards, report, limit=args.limit, subreddits=args.subreddits),
-        args.out,
+        staged,
     )
     print(format_report(report))
-    print(f"\nwrote {n:,} candidates -> {args.out}")
     if n == 0:
-        print("refusing to call this a success: the working set is empty.")
+        staged.unlink(missing_ok=True)
+        print(f"\nrefusing to overwrite {args.out}: the selection is empty.")
         return 1
+    staged.replace(args.out)
+    print(f"\nwrote {n:,} candidates -> {args.out}")
     return 0
 
 

@@ -70,11 +70,22 @@ class TestTriples:
 
     def test_flags_index_the_unscored_ones(self) -> None:
         got = evaluate.flags([emitted(transient=True, comparator_store="Aldi")])
-        assert got[("Market Basket", "produce", "positive")] == (True, "Aldi")
+        assert got[("Market Basket", "produce", "positive")] == (True, "Aldi", "cheap")
+
+    def test_price_signal_is_scored(self) -> None:
+        """It is the sole input to stage 3's entire price index; leaving it
+        unscored let the eval pass a run that called Whole Foods cheap."""
+        score = evaluate.evaluate(
+            extractor_returning([emitted(price_signal="expensive")]),
+            [case(expected=[expected(price_signal="cheap")])],
+        )
+        assert score.recall() == 1.0
+        assert score.flag_accuracy() == 0.0
+        assert score.exact_match() == 0.0
 
     def test_absent_flags_default_rather_than_raise(self) -> None:
         bare = {"store": "Aldi", "category": "meat", "sentiment": "neutral"}
-        assert evaluate.flags([bare])[("Aldi", "meat", "neutral")] == (False, "")
+        assert evaluate.flags([bare])[("Aldi", "meat", "neutral")] == (False, "", "none")
 
 
 class TestAsCandidate:
@@ -128,7 +139,17 @@ class TestScoring:
         score = evaluate.evaluate(
             extractor_returning([emitted()]), [case(expected=[expected()])]
         )
-        assert score.silence_accuracy() == 1.0
+        assert score.silence_accuracy() is None, "no evidence is not perfect"
+
+    def test_an_errored_case_is_not_credited_as_silence(self) -> None:
+        """A case that threw also produced no claims. Counting that as a
+        correct 'found nothing' turns a broken run into a perfect score on
+        the one metric this eval exists to protect."""
+        ex = Extractor(client=FakeClient([BadRequestError()]), sleep=lambda _: None)
+        score = evaluate.evaluate(ex, [case(expected=[])])
+        assert score.errors == 1
+        assert score.silence_accuracy() is None
+        assert score.exact_match() == 0.0
 
     def test_flags_are_scored_over_matched_claims(self) -> None:
         # Right claim, wrong `transient` — a closing-down sale entering the
@@ -146,7 +167,7 @@ class TestScoring:
             extractor_returning([emitted(store="Aldi")]),
             [case(expected=[expected()])],
         )
-        assert score.flag_accuracy() == 1.0
+        assert score.flag_accuracy() is None
 
     def test_an_extraction_error_fails_the_case_without_ending_the_run(self) -> None:
         ex = Extractor(
@@ -159,10 +180,21 @@ class TestScoring:
         assert score.errors == 1
         assert score.exact_match() == pytest.approx(0.5)
 
-    def test_an_empty_score_is_vacuously_perfect(self) -> None:
+    def test_an_empty_score_reports_no_evidence_not_success(self) -> None:
         score = evaluate.Score()
-        assert score.exact_match() == score.f1() == 1.0
-        assert score.flag_accuracy() == 1.0
+        assert score.exact_match() == 1.0
+        assert score.precision() is None
+        assert score.flag_accuracy() is None
+        assert score.silence_accuracy() is None
+        assert score.f1() == 0.0
+
+    def test_emitting_nothing_is_not_perfect_precision(self) -> None:
+        score = evaluate.evaluate(
+            extractor_returning([]), [case(expected=[expected()])]
+        )
+        assert score.precision() is None
+        assert score.recall() == 0.0
+        assert "precision        n/a" in evaluate.format_score(score)
 
     def test_f1_is_zero_when_nothing_matches(self) -> None:
         score = evaluate.evaluate(
@@ -226,10 +258,39 @@ class TestGoldSetIntegrity:
 
     def test_the_prefilter_stores_cover_the_labels(self, cases: list[Any]) -> None:
         """Stage 1 only ever sends stores it matched; a label naming a store
-        outside that list is asking the model to do stage 1's job."""
+        outside that list is asking the model to do stage 1's job. "other" is
+        the exception -- by definition stage 1 cannot have matched it."""
         for c in cases:
             for e in c["expected"]:
-                assert e["store"] in c["stores"], c["id"]
+                assert e["store"] in {*c["stores"], "other"}, c["id"]
+
+    def test_every_case_is_reachable_through_stage_one(
+        self, cases: list[Any]
+    ) -> None:
+        """A case stage 1 would never select measures nothing about stage 2.
+        `unlisted-store` shipped labelling Reliable Market -- a store that IS
+        on the list -- as "other", so it penalised correct behaviour."""
+        from groceries import select
+
+        for c in cases:
+            direct = select.matched_stores(c["text"])
+            parent = select.matched_stores(c["parent_body"]) if c["parent_body"] else []
+            reachable = set(c["stores"]) <= set(direct) or (
+                not direct and set(c["stores"]) == set(parent)
+            )
+            assert reachable, f"{c['id']}: declared {c['stores']}, stage 1 finds {direct or parent}"
+
+    def test_no_label_names_a_store_stage_one_would_have_matched(
+        self, cases: list[Any]
+    ) -> None:
+        from groceries import select
+
+        for c in cases:
+            for e in c["expected"]:
+                if e["store"] == "other":
+                    assert not (
+                        set(select.matched_stores(c["text"])) - set(c["stores"])
+                    ), f"{c['id']}: labelled 'other' but the text names a listed store"
 
     def test_silence_is_well_represented(self, cases: list[Any]) -> None:
         # Most of the corpus supports no claim; if the gold set does not
@@ -274,7 +335,7 @@ class TestFormatting:
             extractor_returning([emitted(transient=False)]),
             [case(expected=[expected(transient=True)])],
         )
-        assert "want (True, '')" in evaluate.format_score(score)
+        assert "want (True, '', 'cheap')" in evaluate.format_score(score)
 
 
 class TestReport:
@@ -287,7 +348,9 @@ class TestReport:
         evaluate.write_report(score, out)
         payload = json.loads(out.read_text())
         assert payload["precision"] == 1.0
-        assert payload["cases"][0]["flag_disagreements"][0]["want"] == [True, ""]
+        assert payload["cases"][0]["flag_disagreements"][0]["want"] == [
+            True, "", "cheap"
+        ]
         assert payload["cases"][0]["exact"] is False
 
 
