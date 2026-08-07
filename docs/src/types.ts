@@ -82,12 +82,44 @@ interface Method {
   note: string;
 }
 
+/** Aggregate Google rating. Statistics only — the payload carries no review
+ *  text, user name or user id, by design. See groceries/crosscheck.py. */
+interface Rating {
+  n: number;
+  mean: number;
+  /** -1..+1, on the same scale as our sentiment */
+  norm: number;
+  /** reviews whose author wrote a paragraph — closest to a Reddit comment */
+  n_long: number;
+  mean_long: number | null;
+  norm_long: number | null;
+  thin: boolean;
+  first: string;
+  last: string;
+  median_date: string;
+}
+
+interface CrossCheck {
+  source: string;
+  citation: string;
+  n_reviews: number;
+  n_locations: number;
+  n_matched_to_map: number;
+  coverage: string;
+  median_date: string;
+  stores: Record<string, Rating>;
+  /** keyed by OSM id, so a map pin can look itself up */
+  locations: Record<string, Rating>;
+}
+
 interface Payload {
   generated_at: string;
   method: Method;
   corpus: Corpus | null;
   places: Place[];
   places_attribution: string;
+  /** Google ratings, held beside the verdict and never merged into it. */
+  crosscheck: CrossCheck | null;
   totals: Record<string, Totals>;
   /** store -> category -> cell */
   stores: Record<string, Record<string, Cell>>;

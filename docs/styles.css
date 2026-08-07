@@ -205,3 +205,21 @@ footer { padding: 18px 20px 40px; color: var(--muted); font-size: 0.84rem; }
 .pin strong { display: block; font-size: 1rem; }
 .pin > div { margin-top: 2px; }
 .pin .linkish { margin-top: 8px; display: inline-block; }
+
+/* ── cross-check ──────────────────────────────────────────────────── */
+#cross-chart-wrap { overflow-x: auto; margin-bottom: 22px; }
+#cross-chart { width: 100%; min-width: 520px; height: auto; display: block; }
+#cross-chart .axis { stroke: var(--line); }
+#cross-chart .gridline { stroke: var(--line); stroke-dasharray: 3 4; }
+#cross-chart .agree { stroke: var(--muted); stroke-dasharray: 4 4; }
+#cross-chart .axis-label { fill: var(--muted); font-size: 11px; }
+#cross-chart .link { stroke: var(--line); stroke-width: 1.5; }
+#cross-chart .reddit { fill: var(--accent); }
+#cross-chart .google { fill: var(--warn); }
+#cross-chart .name { fill: var(--ink); font-size: 11px; }
+.legend { display: flex; gap: 18px; font-size: 0.85rem; color: var(--muted); margin-bottom: 10px; }
+.legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+.legend .dot.reddit { background: var(--accent); }
+.legend .dot.google { background: var(--warn); }
+.gap-big { color: var(--bad); font-weight: 600; }
+.pin .cross { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }

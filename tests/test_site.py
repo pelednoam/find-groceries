@@ -105,6 +105,18 @@ class TestLocationsInPayload:
         assert payload["stores"], "the rest of the site must still build"
 
 
+class TestCrossCheckInPayload:
+    def test_carried_whole_and_kept_separate(self) -> None:
+        block = {"source": "Google Maps reviews", "stores": {"Market Basket": {"n": 9}}}
+        payload = site.build_payload(verdicts(), None, block)
+        assert payload["crosscheck"] == block
+        # and nothing of it reached the verdict
+        assert payload["totals"]["Market Basket"]["s"] == 0.5
+
+    def test_absent_by_default(self) -> None:
+        assert site.build_payload(verdicts())["crosscheck"] is None
+
+
 class TestSlimCell:
     def test_keeps_the_numbers_the_ui_shows(self) -> None:
         got = site.slim_cell(cell())

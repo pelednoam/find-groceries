@@ -27,3 +27,5 @@ docs/ensemble_review_result_schema.json
 
 # Node toolchain for the site (TypeScript + jsdom). Regenerable.
 node_modules/
+
+# Google Local slice — regenerable via scripts/fetch_google_local.py

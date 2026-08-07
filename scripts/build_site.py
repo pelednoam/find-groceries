@@ -22,6 +22,7 @@ from groceries.site import build_payload, write_payload  # noqa: E402
 
 SITE_DATA = ROOT / "docs" / "verdicts.json"
 LOCATIONS = DATA / "locations.json"
+CROSSCHECK = DATA / "crosscheck.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verdicts", type=Path, default=VERDICTS)
     parser.add_argument("--out", type=Path, default=SITE_DATA)
     parser.add_argument("--locations", type=Path, default=LOCATIONS)
+    parser.add_argument("--crosscheck", type=Path, default=CROSSCHECK)
     return parser
 
 
@@ -47,7 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         # The site is useful without a map; say so rather than failing.
         print(f"no {args.locations} — building without the map view.")
         print("Run scripts/fetch_store_locations.py to add it.")
-    payload = build_payload(verdicts, locations)
+    crosscheck = None
+    if args.crosscheck.exists():
+        crosscheck = json.loads(args.crosscheck.read_text(encoding="utf-8"))
+    else:
+        print(f"no {args.crosscheck} — building without the Google cross-check.")
+    payload = build_payload(verdicts, locations, crosscheck)
     written = write_payload(payload, args.out)
 
     before = args.verdicts.stat().st_size
@@ -57,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
           f"{sum(len(v) for v in payload['items'].values())} items, "
           f"{len(payload['places'])} mapped locations "
           f"({sum(1 for p in payload['places'] if p.get('branch'))} linked to a branch)")
+    cc = payload.get("crosscheck")
+    if cc:
+        print(f"cross-check: {cc['n_reviews']:,} Google ratings, "
+              f"{len(cc['stores'])} stores, {cc['n_matched_to_map']} pins")
     print(f"{before / 1e6:.1f}MB verdicts -> {written / 1e6:.1f}MB payload "
           f"({written / before:.0%})")
     print(f"wrote {args.out}")

@@ -136,7 +136,9 @@ def is_branch(name: str) -> bool:
 
 
 def build_payload(
-    verdicts: Mapping[str, Any], locations: Mapping[str, Any] | None = None
+    verdicts: Mapping[str, Any],
+    locations: Mapping[str, Any] | None = None,
+    crosscheck: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reshape the verdict document into the site payload."""
     stores = {s: slim_group(cats) for s, cats in verdicts["stores"].items()}
@@ -182,6 +184,8 @@ def build_payload(
         "corpus": verdicts["corpus"],
         "places": places,
         "places_attribution": attribution,
+        # Carried whole and never merged into `stores`. See groceries/crosscheck.py.
+        "crosscheck": dict(crosscheck) if crosscheck else None,
         "totals": {
             s: {
                 "n": t["n_claims"],

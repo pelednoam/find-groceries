@@ -356,6 +356,105 @@ function renderScatter(rows: CmpRow[]): void {
   }
 }
 
+/* ── view: cross-check ──────────────────────────────────────────────── */
+
+/** Which Google population the reader chose: all ratings, or only the ones
+ *  with a paragraph. The two differ by 0.36 stars on average and by 1.15 for
+ *  one chain, so the choice is the reader's rather than ours. */
+function googleValue(r: Rating): number | null {
+  const key = need<HTMLSelectElement>("#cross-pop").value;
+  return key === "norm_long" ? r.norm_long : r.norm;
+}
+
+interface CrossRow { store: string; reddit: number; google: number; gap: number; r: Rating }
+
+function crossRows(): CrossRow[] {
+  const cc = data().crosscheck;
+  if (!cc) return [];
+  const rows: CrossRow[] = [];
+  for (const [store, r] of Object.entries(cc.stores)) {
+    const totals = data().totals[store];
+    const google = googleValue(r);
+    if (!totals || google === null || r.thin) continue;
+    rows.push({ store, reddit: totals.s, google, gap: google - totals.s, r });
+  }
+  return rows.sort((a, b) => b.gap - a.gap);
+}
+
+function renderCross(): void {
+  const cc = data().crosscheck;
+  const body = need("#cross-table tbody");
+  clear(body);
+  if (!cc) {
+    body.append(el("tr", {}, el("td", { colspan: "7", class: "empty",
+      text: "No Google cross-check in this build." })));
+    return;
+  }
+  const rows = crossRows();
+  const mean = rows.length
+    ? rows.reduce((a, b) => a + b.gap, 0) / rows.length : 0;
+  need("#cross-summary").textContent =
+    `${cc.n_reviews.toLocaleString()} ratings, ${cc.coverage} · `
+    + `Google reads ${fmt(mean)} vs the corpus on average`;
+  need("#cross-cite").textContent = cc.citation;
+
+  for (const row of rows) {
+    const tr = el("tr", {}, [
+      el("td", { text: row.store }),
+      el("td", { class: "num" }, el("span", { class: "score " + cls(row.reddit), text: fmt(row.reddit) })),
+      el("td", { class: "num" }, el("span", { class: "score " + cls(row.google), text: fmt(row.google) })),
+      el("td", { class: "num" }, el("span", {
+        class: Math.abs(row.gap) >= 0.5 ? "gap-big" : "muted", text: fmt(row.gap) })),
+      el("td", { class: "num muted", text: row.r.mean.toFixed(2) + "★" }),
+      el("td", { class: "num muted", text: row.r.n.toLocaleString() }),
+      el("td", { class: "num muted", text: row.r.median_date }),
+    ]);
+    tr.addEventListener("click", () => showStore(row.store));
+    body.append(tr);
+  }
+  renderCrossChart(rows);
+}
+
+/** A dumbbell per store: the two sources joined by a line, so the gap is the
+ *  thing you see rather than a number you have to subtract. */
+function renderCrossChart(rows: CrossRow[]): void {
+  const svg = need<HTMLElement>("#cross-chart");
+  clear(svg);
+  const W = 640, m = { t: 30, r: 24, b: 16, l: 150 };
+  const rowH = 23;
+  const H = m.t + m.b + Math.max(1, rows.length) * rowH;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const x = (v: number): number => m.l + ((v + 1) / 2) * (W - m.l - m.r);
+
+  for (const v of [-1, -0.5, 0, 0.5, 1]) {
+    svg.append(svgEl("line", { class: v === 0 ? "axis" : "gridline",
+      x1: x(v), x2: x(v), y1: m.t - 8, y2: H - m.b }));
+    const t = svgEl("text", { class: "axis-label", x: x(v), y: m.t - 14,
+      "text-anchor": "middle" });
+    t.textContent = v.toFixed(1);
+    svg.append(t);
+  }
+  rows.forEach((row, i) => {
+    const y = m.t + i * rowH + rowH / 2;
+    const name = svgEl("text", { class: "name", x: m.l - 10, y: y + 4, "text-anchor": "end" });
+    name.textContent = row.store;
+    svg.append(name);
+    svg.append(svgEl("line", { class: "link", x1: x(row.reddit), x2: x(row.google), y1: y, y2: y }));
+    const rd = svgEl("circle", { class: "reddit", cx: x(row.reddit), cy: y, r: 5 });
+    const rt = svgEl("title", {}); rt.textContent = `Reddit ${fmt(row.reddit)}`; rd.append(rt);
+    const gd = svgEl("circle", { class: "google", cx: x(row.google), cy: y, r: 5 });
+    const gt = svgEl("title", {});
+    gt.textContent = `Google ${fmt(row.google)} (${row.r.n.toLocaleString()} ratings)`;
+    gd.append(gt);
+    svg.append(rd, gd);
+  });
+  if (!rows.length) {
+    const t = svgEl("text", { class: "axis-label", x: W / 2, y: H / 2, "text-anchor": "middle" });
+    t.textContent = "no store has both a verdict and enough Google ratings";
+    svg.append(t);
+  }
+}
+
 /* ── view: map ──────────────────────────────────────────────────────── */
 
 /* Leaflet is loaded from docs/vendor/, not a CDN, and typed by
@@ -414,8 +513,14 @@ function renderMap(): void {
     if (onlyEvidence && !place.branch) continue;
     const totals = data().totals[place.store];
     const { cell } = placeScore(place);
-    const sentiment = cat ? cell?.s : totals?.s;
+    const rating = data().crosscheck?.locations[place.osm];
+    const byGoogle = need<HTMLInputElement>("#map-google").checked;
+    let sentiment = cat ? cell?.s : totals?.s;
     if (cat && cell === undefined) continue;
+    if (byGoogle) {
+      if (!rating || rating.thin) continue;
+      sentiment = rating.norm;
+    }
 
     const marker = L.circleMarker([place.lat, place.lon], {
       radius: 7,
@@ -438,6 +543,14 @@ function renderMap(): void {
         text: fmt(sentiment) + (cat ? " " + titleCase(cat) : " overall") })));
     }
     if (cell) pop.append(el("div", { class: "muted", text: `${cell.n} claims` }));
+    if (rating && !rating.thin) {
+      const box = el("div", { class: "cross" });
+      box.append(el("span", { class: "score " + cls(rating.norm),
+        text: `${rating.mean.toFixed(2)}★ Google` }));
+      box.append(el("span", { class: "muted",
+        text: ` · ${rating.n.toLocaleString()} ratings to ${rating.last}` }));
+      pop.append(box);
+    }
     const link = el("button", { class: "linkish", type: "button", text: "see the evidence →" });
     link.addEventListener("click", () => showStore(place.store, place.branch));
     pop.append(link);
@@ -524,6 +637,23 @@ function renderStore(wantBranch?: string): void {
     head.append(el("p", { class: "badges" },
       el("span", { class: "badge warn", text: "thin evidence — treat with caution" })));
   }
+  const rating = data().crosscheck?.stores[store];
+  if (rating && !rating.thin && totals) {
+    const cross = el("p", { class: "badges" });
+    cross.append(el("span", { class: "badge " + (cls(totals.s) === "pos" ? "good" : cls(totals.s) === "neg" ? "bad" : ""),
+      text: `Reddit ${fmt(totals.s)}` }));
+    cross.append(el("span", { class: "badge " + (cls(rating.norm) === "pos" ? "good" : cls(rating.norm) === "neg" ? "bad" : ""),
+      text: `Google ${rating.mean.toFixed(2)}★ (${fmt(rating.norm)})` }));
+    const gap = rating.norm - totals.s;
+    if (Math.abs(gap) >= 0.5) {
+      cross.append(el("span", { class: "badge warn", text: `sources disagree by ${fmt(gap)}` }));
+    }
+    head.append(cross);
+    head.append(el("p", { class: "why",
+      text: `${rating.n.toLocaleString()} Google ratings, ${rating.first} to ${rating.last}`
+          + ` — not merged into the verdict above` }));
+  }
+
   const pins = data().places.filter((p) => p.store === store);
   if (pins.length) {
     const go = el("button", { class: "linkish", type: "button",
@@ -616,7 +746,7 @@ function renderItems(): void {
 
 /* ── boot ───────────────────────────────────────────────────────────── */
 
-const VIEWS = ["list", "compare", "map", "store", "items", "method"] as const;
+const VIEWS = ["list", "compare", "cross", "map", "store", "items", "method"] as const;
 type View = (typeof VIEWS)[number];
 
 function switchView(name: View): void {
@@ -631,6 +761,7 @@ function renderView(name: View): void {
   if (name === "compare") renderCompare();
   if (name === "store") renderStore();
   if (name === "items") renderItems();
+  if (name === "cross") renderCross();
   if (name === "map" && !mapDrawn) renderMap();
   else if (name === "map") setTimeout(() => map?.invalidateSize(), 0);
 }
@@ -646,6 +777,7 @@ function fillMethod(): void {
     ["Branches", Object.values(data().branches).reduce((a, b) => a + Object.keys(b).length, 0)],
     ["Items indexed", Object.values(data().items).reduce((a, b) => a + Object.keys(b).length, 0)],
     ["Mapped locations", data().places.length],
+    ["Google ratings (cross-check)", (data().crosscheck?.n_reviews ?? 0).toLocaleString()],
     ["Shrinkage constant", data().method.shrinkage_k],
     ["Default half-life", data().method.default_half_life_years + " years"],
     ["Transient claims", data().method.transient_claims],
@@ -726,6 +858,8 @@ async function boot(): Promise<void> {
       renderCompare();
     });
   }
+  need("#cross-pop").addEventListener("change", renderCross);
+  need("#map-google").addEventListener("change", renderMap);
   need("#map-store").addEventListener("change", renderMap);
   need("#map-cat").addEventListener("change", renderMap);
   need("#map-evidence").addEventListener("change", renderMap);

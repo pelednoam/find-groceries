@@ -23,6 +23,7 @@
   <button role="tab" data-view="list" class="on">Shopping list</button>
   <button role="tab" data-view="compare">Compare stores</button>
   <button role="tab" data-view="map">Map</button>
+  <button role="tab" data-view="cross">Reddit vs Google</button>
   <button role="tab" data-view="store">Store detail</button>
   <button role="tab" data-view="items">Item search</button>
   <button role="tab" data-view="method">Method</button>
@@ -84,6 +85,48 @@
     </table>
   </section>
 
+  <!-- ── Cross-check ───────────────────────────────────────────────── -->
+  <section id="view-cross" class="view" hidden>
+    <div class="prose" style="max-width:none">
+      <p>Two sources, deliberately <strong>not</strong> averaged. Reddit is
+      comparative and skews toward complaint; Google reviewers are
+      self-selected customers of the shop they are rating. Averaging them
+      would quietly rehabilitate exactly the stores the corpus is hardest on,
+      and the result would look like new evidence rather than a change of
+      source mix.</p>
+    </div>
+    <div class="controls">
+      <label>Google population
+        <select id="cross-pop">
+          <option value="norm">all ratings</option>
+          <option value="norm_long">only reviews with a paragraph</option>
+        </select>
+      </label>
+      <output id="cross-summary" class="muted"></output>
+    </div>
+    <div class="legend">
+      <span><i class="dot reddit"></i>Reddit verdict (this pipeline)</span>
+      <span><i class="dot google"></i>Google rating, normalised to the same scale</span>
+    </div>
+    <div id="cross-chart-wrap">
+      <svg id="cross-chart" viewBox="0 0 640 560" role="img"
+           aria-label="Reddit verdict against Google rating for each store"></svg>
+    </div>
+    <table id="cross-table" class="data">
+      <thead><tr>
+        <th>Store</th>
+        <th class="num">Reddit</th>
+        <th class="num">Google</th>
+        <th class="num">Gap</th>
+        <th class="num">★ mean</th>
+        <th class="num">Ratings</th>
+        <th class="num">Median</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="fineprint" id="cross-cite"></p>
+  </section>
+
   <!-- ── Map ───────────────────────────────────────────────────────── -->
   <section id="view-map" class="view" hidden>
     <div class="controls">
@@ -91,6 +134,8 @@
       <label>Colour by <select id="map-cat"><option value="">overall sentiment</option></select></label>
       <label class="check"><input type="checkbox" id="map-evidence">
         only branches with their own evidence</label>
+      <label class="check"><input type="checkbox" id="map-google">
+        colour by Google rating instead</label>
       <output id="map-count" class="muted"></output>
     </div>
     <div id="map"></div>
@@ -158,6 +203,29 @@
         calling a store cheap is not enough to label it.</p>
       <p>One-off events — a closing-down sale, a pandemic stock-out — are tagged at
         extraction time and excluded, so a liquidation does not make a store look cheap.</p>
+
+      <h2>Two sources, not averaged</h2>
+      <p>A second source sits beside the Reddit verdict: 135,345 Google Maps
+        ratings for these stores, from a research dataset that ends in
+        September 2021. It is shown on the
+        <button type="button" class="linkish" data-view="cross">Reddit vs Google</button>
+        tab and never merged into the numbers above.</p>
+      <p>The reason is that the two disagree in a patterned way. Google reads
+        about <strong>+0.41</strong> more positive overall, but the gap is
+        concentrated: the big chains people complain about here are rated
+        perfectly fine on Google (Stop &amp; Shop &minus;0.52 against +0.51),
+        while the specialty shops agree to within a few hundredths. Averaging
+        would selectively rehabilitate the stores this corpus is hardest on,
+        and the output would read as new evidence rather than as a change in
+        which source was doing the talking.</p>
+      <p>There is a second layer. Restrict Google to reviews whose author
+        wrote a paragraph — the population closest to a Reddit comment — and
+        the mean drops 0.36 stars, halving the gap. People tap five stars on
+        the way out and write prose when annoyed. Which Google number you
+        quote is itself a choice, so the tab lets you pick and shows both.</p>
+      <p class="fineprint">Only counts and averages are published from that
+        dataset. No Google review text, author name or user id appears
+        anywhere in this site or its data file.</p>
 
       <h2>Provenance</h2>
       <dl id="m-prov"></dl>

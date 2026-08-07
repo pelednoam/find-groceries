@@ -129,6 +129,27 @@ setTimeout(() => {
   ok($("#store-body h3").textContent.includes("Market Basket — Somerville"),
      "branch drill-down works", $("#store-body h3").textContent);
 
+  console.log("\n[reddit vs google]");
+  click($('[data-view="cross"]'));
+  ok(!$("#view-cross").hidden, "cross-check view shown");
+  const crossRows = $$("#cross-table tbody tr");
+  ok(crossRows.length >= 15, "stores compared", crossRows.length);
+  ok($$("#cross-chart circle.reddit").length === crossRows.length, "a reddit dot per row");
+  ok($$("#cross-chart circle.google").length === crossRows.length, "a google dot per row");
+  ok($("#cross-summary").textContent.includes("ratings"), "summary line");
+  ok($("#cross-cite").textContent.includes("San Diego"), "dataset cited");
+  const worst = crossRows[0];
+  console.log("        biggest gap: " + [...worst.children].slice(0,4)
+    .map(c => c.textContent).join("  "));
+  const allGap = worst.children[3].textContent;
+  $("#cross-pop").value = "norm_long";
+  $("#cross-pop").dispatchEvent(new window.Event("change"));
+  const longGap = $("#cross-table tbody tr").children[3].textContent;
+  ok(allGap !== longGap, "population switch changes the numbers", `${allGap} vs ${longGap}`);
+  console.log("        same store, paragraph-writers only: " + longGap);
+  $("#cross-pop").value = "norm";
+  $("#cross-pop").dispatchEvent(new window.Event("change"));
+
   console.log("\n[map]");
   click($('[data-view="map"]'));
   ok(!$("#view-map").hidden, "map view shown");
@@ -141,6 +162,15 @@ setTimeout(() => {
   ok(L.made.markers.every((m) => m.popup && m.popup.nodeType === 1),
      "popups are DOM nodes, not HTML strings");
   ok($("#map-attrib").textContent.includes("OpenStreetMap"), "locations attributed");
+  const withGoogle = L.made.markers.filter(m =>
+    (m.popup && m.popup.textContent || "").includes("Google")).length;
+  ok(withGoogle > 100, "pins carry the Google rating", withGoogle);
+  $("#map-google").checked = true;
+  $("#map-google").dispatchEvent(new window.Event("change"));
+  ok(L.made.markers.length > 0 && L.made.markers.length <= total,
+     "colour-by-Google renders", L.made.markers.length);
+  $("#map-google").checked = false;
+  $("#map-google").dispatchEvent(new window.Event("change"));
 
   const before = L.made.markers.length;
   $("#map-store").value = "Market Basket";
