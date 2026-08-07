@@ -281,6 +281,12 @@ function renderCompare() {
                 ? el("span", { class: "muted", text: "–" })
                 : el("span", { class: "score " + cls(r.quality), text: fmt(r.quality) })),
             el("td", { class: "num" }, el("span", { class: "score " + cls(r.sentiment), text: fmt(r.sentiment) })),
+            el("td", { class: "num" }, (() => {
+                const m = data().merged?.stores[r.store];
+                return m && m.g !== undefined
+                    ? el("span", { class: "score " + cls(m.v), text: fmt(m.v) })
+                    : el("span", { class: "muted", text: "–" });
+            })()),
             el("td", { class: "num muted", text: r.n.toLocaleString() }),
             el("td", { class: "num muted", text: r.w.toLocaleString() }),
         ]);
@@ -337,6 +343,39 @@ function renderScatter(rows) {
     if (!pts.length) {
         label("no store has both price and quality evidence here", W / 2, H / 2, "axis-label");
     }
+}
+/* ── merged estimate ────────────────────────────────────────────────── */
+/** Render a combined estimate so the inputs stay visible.
+ *
+ * A merged number that hides what went into it is a number the reader cannot
+ * argue with, and here the mix varies enormously — Reddit holds 93% of the
+ * weight at Market Basket Somerville and 13% at a branch with one claim. The
+ * bar shows that split.
+ */
+function mergedBlock(m, label) {
+    const box = el("div", { class: "merged" });
+    const head = el("div", { class: "merged-head" }, [
+        el("span", { class: "score " + cls(m.v), text: fmt(m.v) }),
+        el("span", { class: "muted", text: `${label} · ±${m.se.toFixed(2)}` }),
+    ]);
+    if (m.conflict) {
+        head.append(el("span", { class: "badge bad", text: "sources conflict" }));
+    }
+    box.append(head);
+    if (m.r !== undefined && m.g !== undefined) {
+        const bar = el("div", { class: "mixbar" });
+        bar.append(el("span", { class: "mix reddit", style: `width:${m.share * 100}%` }));
+        bar.append(el("span", { class: "mix google", style: `width:${(1 - m.share) * 100}%` }));
+        box.append(bar);
+        box.append(el("div", { class: "mixlab" }, [
+            el("span", { text: `Reddit ${fmt(m.r)} · ${(m.share * 100).toFixed(0)}% of the weight` }),
+            el("span", { text: `Google ${fmt(m.g)} · ${((1 - m.share) * 100).toFixed(0)}%` }),
+        ]));
+    }
+    else {
+        box.append(el("div", { class: "mixlab" }, el("span", { text: m.r !== undefined ? "Reddit only" : "Google only" })));
+    }
+    return box;
 }
 /* ── view: cross-check ──────────────────────────────────────────────── */
 /** Which Google population the reader chose: all ratings, or only the ones
@@ -492,14 +531,24 @@ function renderMap() {
         const totals = data().totals[place.store];
         const { cell } = placeScore(place);
         const rating = data().crosscheck?.locations[place.osm];
-        const byGoogle = need("#map-google").checked;
+        const colourBy = need("#map-colour").value;
+        const byGoogle = colourBy === "google";
+        const byMerged = colourBy === "merged";
         let sentiment = cat ? cell?.s : totals?.s;
         if (cat && cell === undefined)
             continue;
+        const mergedHere = place.branch
+            ? data().merged?.branches[place.store]?.[place.branch]
+            : data().merged?.stores[place.store];
         if (byGoogle) {
             if (!rating || rating.thin)
                 continue;
             sentiment = rating.norm;
+        }
+        else if (byMerged) {
+            if (!mergedHere)
+                continue;
+            sentiment = mergedHere.v;
         }
         const marker = L.circleMarker([place.lat, place.lon], {
             radius: 7,
@@ -524,6 +573,14 @@ function renderMap() {
         }
         if (cell)
             pop.append(el("div", { class: "muted", text: `${cell.n} claims` }));
+        if (mergedHere && mergedHere.g !== undefined && mergedHere.r !== undefined) {
+            const box = el("div", { class: "cross" });
+            box.append(el("span", { class: "score " + cls(mergedHere.v),
+                text: `${fmt(mergedHere.v)} combined` }));
+            box.append(el("span", { class: "muted",
+                text: ` · ${(mergedHere.share * 100).toFixed(0)}% Reddit` }));
+            pop.append(box);
+        }
         if (rating && !rating.thin) {
             const box = el("div", { class: "cross" });
             box.append(el("span", { class: "score " + cls(rating.norm),
@@ -609,6 +666,12 @@ function renderStore(wantBranch) {
             + `${nBranch} branch${nBranch === 1 ? "" : "es"} with their own evidence` }));
     if (totals?.thin) {
         head.append(el("p", { class: "badges" }, el("span", { class: "badge warn", text: "thin evidence — treat with caution" })));
+    }
+    const merged = pick.value
+        ? data().merged?.branches[store]?.[pick.value]
+        : data().merged?.stores[store];
+    if (merged) {
+        head.append(mergedBlock(merged, pick.value ? "combined, this branch" : "combined, chain"));
     }
     const rating = data().crosscheck?.stores[store];
     if (rating && !rating.thin && totals) {
@@ -748,12 +811,36 @@ function fillMethod() {
         ["Items indexed", Object.values(data().items).reduce((a, b) => a + Object.keys(b).length, 0)],
         ["Mapped locations", data().places.length],
         ["Google ratings (cross-check)", (data().crosscheck?.n_reviews ?? 0).toLocaleString()],
+        ["Calibration slope", data().merged?.calibration.slope ?? "n/a"],
+        ["Calibration LOO error", data().merged?.calibration.loo_rmse ?? "n/a"],
         ["Shrinkage constant", data().method.shrinkage_k],
         ["Default half-life", data().method.default_half_life_years + " years"],
         ["Transient claims", data().method.transient_claims],
     ];
     for (const [k, v] of pairs)
         dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
+}
+/** The Method page quotes real numbers rather than remembered ones. */
+function fillCalibrationProse() {
+    const m = data().merged;
+    if (!m)
+        return;
+    const c = m.calibration;
+    need("#m-cal").textContent =
+        `reddit = ${c.intercept.toFixed(2)} + ${c.slope.toFixed(2)} x google`;
+    need("#m-loo").textContent = c.loo_rmse.toFixed(3);
+    need("#m-resid").textContent = `±${c.residual_sd.toFixed(2)}`;
+    const cc = data().crosscheck;
+    if (cc) {
+        const deltas = Object.values(cc.stores)
+            .filter((r) => !r.thin)
+            .map((r) => c.intercept + c.slope * r.norm - r.norm);
+        if (deltas.length) {
+            need("#m-range").textContent =
+                `from ${fmt(Math.min(...deltas))} for the worst-rated to `
+                    + `${fmt(Math.max(...deltas))} for the best`;
+        }
+    }
 }
 async function boot() {
     try {
@@ -797,6 +884,7 @@ async function boot() {
         need("#m-span").textContent = `${dates[0]} to ${dates[dates.length - 1]}`;
     }
     fillMethod();
+    fillCalibrationProse();
     for (const b of all("[data-view]")) {
         b.addEventListener("click", () => {
             const v = b.dataset["view"];
@@ -832,7 +920,7 @@ async function boot() {
         });
     }
     need("#cross-pop").addEventListener("change", renderCross);
-    need("#map-google").addEventListener("change", renderMap);
+    need("#map-colour").addEventListener("change", renderMap);
     need("#map-store").addEventListener("change", renderMap);
     need("#map-cat").addEventListener("change", renderMap);
     need("#map-evidence").addEventListener("change", renderMap);

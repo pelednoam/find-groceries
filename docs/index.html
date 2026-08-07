@@ -77,7 +77,8 @@
         <th data-sort="store">Store</th>
         <th data-sort="price" class="num">Price</th>
         <th data-sort="quality" class="num">Quality</th>
-        <th data-sort="sentiment" class="num">Overall</th>
+        <th data-sort="sentiment" class="num">Reddit</th>
+        <th class="num">Combined</th>
         <th data-sort="n" class="num">Claims</th>
         <th data-sort="w" class="num">Evidence</th>
       </tr></thead>
@@ -134,8 +135,13 @@
       <label>Colour by <select id="map-cat"><option value="">overall sentiment</option></select></label>
       <label class="check"><input type="checkbox" id="map-evidence">
         only branches with their own evidence</label>
-      <label class="check"><input type="checkbox" id="map-google">
-        colour by Google rating instead</label>
+      <label>Colour source
+        <select id="map-colour">
+          <option value="reddit">Reddit verdict</option>
+          <option value="merged">combined estimate</option>
+          <option value="google">Google rating</option>
+        </select>
+      </label>
       <output id="map-count" class="muted"></output>
     </div>
     <div id="map"></div>
@@ -226,6 +232,36 @@
       <p class="fineprint">Only counts and averages are published from that
         dataset. No Google review text, author name or user id appears
         anywhere in this site or its data file.</p>
+
+      <h2>Combining the two</h2>
+      <p>The tab above shows the sources apart. The store pages also show them
+        <em>combined</em>, and the way that works is worth stating because the
+        obvious method is wrong.</p>
+      <p>Google's ratings are not shifted relative to the corpus so much as
+        <strong>compressed</strong>: they rank the stores nearly the same way
+        (r&nbsp;=&nbsp;+0.86) but occupy 31% of the range, bunched near the top
+        the way star ratings always are. So the correction is not an offset,
+        it is a rescale — <code id="m-cal"></code> — fitted across every store
+        that has both. Two parameters over twenty stores; leave-one-out error
+        <code id="m-loo"></code> against <code>0.434</code> for simply guessing
+        the average, so the map predicts stores it has not seen.</p>
+      <p>A literal per-store offset would have been twenty parameters for
+        twenty stores. It would fit perfectly, erase every disagreement by
+        construction, and hand back a "combined" figure identical to whichever
+        source it was anchored on. The rescale still corrects each store by a
+        different amount — <span id="m-range"></span> — because the correction
+        depends on where the store sits.</p>
+      <p>The two are then combined by inverse variance, which decides the mix
+        on its own. Whatever remains unexplained after calibration
+        (<code id="m-resid"></code>) is a floor on how precise a Google
+        estimate can be, no matter how many ratings back it — so Reddit keeps
+        almost all the weight wherever it has thousands of claims, and cedes
+        it where it has one. Across the branches that have both, Reddit's
+        share runs from 13% to 93%. Every combined number on this site shows
+        that split beneath it.</p>
+      <p>Google contributes one figure per shop, so the combination applies to
+        the <em>overall</em> verdict only. There is no Google opinion about a
+        store's produce, and none is invented.</p>
 
       <h2>Provenance</h2>
       <dl id="m-prov"></dl>

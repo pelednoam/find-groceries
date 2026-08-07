@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
 from .jsonl import write_atomic
 from .locations import attach_branches
+from .merge import Calibration, combine, fit_calibration
 
 # Evidence quotes per cell in the published payload. Three is what the UI
 # shows before "more"; the rest is weight the reader never sees.
@@ -135,6 +136,117 @@ def is_branch(name: str) -> bool:
     return not REGION_HINTS.match(name.strip().casefold())
 
 
+def _merge_block(
+    verdicts: Mapping[str, Any],
+    crosscheck: Mapping[str, Any] | None,
+    places: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Combine the two sources, chain-level and branch-level.
+
+    Google has no category breakdown — one number per location — so the merge
+    can only sharpen the *overall* verdict for a store or a branch. Nothing
+    here touches the per-category cells, and it must not: there is no Google
+    opinion about a store's produce to combine with.
+    """
+    if not crosscheck:
+        return None
+    totals = verdicts["store_totals"]
+    ratings: Mapping[str, Any] = crosscheck["stores"]
+
+    pairs = [
+        (float(r["norm"]), float(totals[store]["sentiment"]))
+        for store, r in ratings.items()
+        if store in totals and _usable(r) and not r.get("thin", False)
+    ]
+    cal = fit_calibration(pairs)
+    if cal is None:
+        return None
+
+    stores: dict[str, Any] = {}
+    for store, t in totals.items():
+        rating = ratings.get(store)
+        m = combine(
+            float(t["sentiment"]), float(t["weighted_evidence"]),
+            rating if rating is not None and _usable(rating) else None, cal,
+        )
+        if m is not None:
+            stores[store] = m.as_dict()
+
+    branches = _merge_branches(verdicts, crosscheck, places, cal)
+    return {
+        "calibration": cal.as_dict(),
+        "stores": stores,
+        "branches": branches,
+        "note": (
+            "Google contributes one number per location, so the merge applies "
+            "to the overall verdict only, never to a category."
+        ),
+    }
+
+
+def _merge_branches(
+    verdicts: Mapping[str, Any],
+    crosscheck: Mapping[str, Any],
+    places: Sequence[Mapping[str, Any]],
+    cal: Calibration,
+) -> dict[str, dict[str, Any]]:
+    """Merge per (store, branch), pooling every pin linked to that branch.
+
+    This is where the combination earns its keep: only 26% of Reddit claims
+    name a branch, while Google has ratings for almost every location.
+    """
+    by_osm: Mapping[str, Any] = crosscheck["locations"]
+    # A branch can have more than one pin; pool their ratings by count.
+    pooled: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for place in places:
+        branch = place.get("branch")
+        rating = by_osm.get(place["osm"])
+        if branch and rating and _usable(rating):
+            pooled.setdefault((place["store"], branch), []).append(rating)
+
+    out: dict[str, dict[str, Any]] = {}
+    branch_totals: Mapping[str, Mapping[str, Any]] = verdicts.get("branch_totals", {})
+    seen: set[tuple[str, str]] = set()
+    for store, by_branch in branch_totals.items():
+        for branch, t in by_branch.items():
+            seen.add((store, branch))
+            m = combine(
+                float(t["sentiment"]), float(t["weighted_evidence"]),
+                _pool(pooled.get((store, branch), [])), cal,
+            )
+            if m is not None:
+                out.setdefault(store, {})[branch] = m.as_dict()
+    # Branches with a rating but no Reddit evidence at all are still worth
+    # showing: "nobody on Reddit discussed this one, Google says 4.3".
+    for (store, branch), ratings in pooled.items():
+        if (store, branch) in seen:
+            continue
+        m = combine(None, 0.0, _pool(ratings), cal)
+        if m is not None:
+            out.setdefault(store, {})[branch] = m.as_dict()
+    return out
+
+
+def _usable(rating: Mapping[str, Any]) -> bool:
+    """Whether a rating carries what the merge needs.
+
+    This is a boundary onto a separately-generated file, so a block written
+    by an older version of the cross-check must degrade to "no Google here"
+    rather than to a KeyError halfway through building the payload.
+    """
+    return "norm" in rating and "n" in rating
+
+
+def _pool(ratings: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Count-weighted mean of several locations' ratings."""
+    usable = [r for r in ratings if _usable(r) and int(r["n"]) > 0]
+    if not usable:
+        return None
+    total = sum(int(r["n"]) for r in usable)
+    norm = sum(float(r["norm"]) * int(r["n"]) for r in usable) / total
+    return {"n": total, "norm": norm}
+
+
 def build_payload(
     verdicts: Mapping[str, Any],
     locations: Mapping[str, Any] | None = None,
@@ -178,6 +290,8 @@ def build_payload(
                 entry["branch"] = branch
             places.append(entry)
 
+    merged = _merge_block(verdicts, crosscheck, places)
+
     return {
         "generated_at": verdicts["generated_at"],
         "method": verdicts["method"],
@@ -186,6 +300,7 @@ def build_payload(
         "places_attribution": attribution,
         # Carried whole and never merged into `stores`. See groceries/crosscheck.py.
         "crosscheck": dict(crosscheck) if crosscheck else None,
+        "merged": merged,
         "totals": {
             s: {
                 "n": t["n_claims"],

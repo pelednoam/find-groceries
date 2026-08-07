@@ -117,6 +117,108 @@ class TestCrossCheckInPayload:
         assert site.build_payload(verdicts())["crosscheck"] is None
 
 
+class TestMergeInPayload:
+    def _cc(self) -> dict[str, Any]:
+        # Enough stores for the calibration to have degrees of freedom.
+        return {"stores": {
+            f"S{i}": {"n": 500, "norm": 0.5 + 0.02 * i, "thin": False}
+            for i in range(8)
+        }, "locations": {}}
+
+    def _verdicts(self) -> dict[str, Any]:
+        v = verdicts()
+        v["store_totals"] = {
+            f"S{i}": {"n_claims": 100, "weighted_evidence": 40.0,
+                      "sentiment": -0.5 + 0.15 * i, "insufficient_evidence": False}
+            for i in range(8)
+        }
+        v["stores"] = {f"S{i}": {"produce": cell()} for i in range(8)}
+        v["branches"] = {}
+        v["branch_totals"] = {}
+        v["items"] = {}
+        return v
+
+    def test_absent_without_a_crosscheck(self) -> None:
+        assert site.build_payload(verdicts())["merged"] is None
+
+    def test_produces_a_calibration_and_per_store_values(self) -> None:
+        payload = site.build_payload(self._verdicts(), None, self._cc())
+        merged = payload["merged"]
+        assert merged is not None
+        assert merged["calibration"]["n_stores"] == 8
+        assert len(merged["stores"]) == 8
+
+    def test_the_per_category_cells_are_left_alone(self) -> None:
+        """Google has one number per shop and no opinion about produce.
+        The merge must not touch a category cell."""
+        v = self._verdicts()
+        before = site.build_payload(v)["stores"]
+        after = site.build_payload(v, None, self._cc())["stores"]
+        assert before == after
+
+    def test_the_reddit_totals_are_left_alone(self) -> None:
+        payload = site.build_payload(self._verdicts(), None, self._cc())
+        assert payload["totals"]["S0"]["s"] == -0.5
+
+    def test_a_malformed_rating_degrades_rather_than_raising(self) -> None:
+        """The cross-check is a separately generated file; one written by an
+        older version must mean "no Google here", not a build failure."""
+        cc = self._cc()
+        cc["stores"]["S9"] = {"n": 5}          # no norm, no thin
+        payload = site.build_payload(self._verdicts(), None, cc)
+        assert payload["merged"] is not None
+
+    def _with_branches(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        v = self._verdicts()
+        v["branches"] = {"S0": {"Somerville": {"produce": cell()}}}
+        v["branch_totals"] = {"S0": {"Somerville": {
+            "n_claims": 2, "weighted_evidence": 0.6, "sentiment": -0.4}}}
+        cc = self._cc()
+        cc["locations"] = {"node/1": {"n": 400, "norm": 0.8},
+                           "node/2": {"n": 200, "norm": 0.6}}
+        loc = {"attribution": "osm", "places": [
+            {"store": "S0", "name": "S0", "lat": 42.3875, "lon": -71.0995,
+             "address": "1 A St", "city": "Somerville", "osm": "node/1"},
+            {"store": "S0", "name": "S0", "lat": 42.3876, "lon": -71.0996,
+             "address": "2 B St", "city": "Somerville", "osm": "node/2"},
+        ]}
+        return v, cc, loc
+
+    def test_branches_are_merged_and_pins_pooled(self) -> None:
+        """Two shops serving one branch name pool by rating count rather than
+        one of them being picked."""
+        v, cc, loc = self._with_branches()
+        merged = site.build_payload(v, loc, cc)["merged"]
+        b = merged["branches"]["S0"]["Somerville"]
+        assert b["r"] == -0.4 and b["g"] is not None
+        # pooled norm = (400*0.8 + 200*0.6)/600 = 0.733
+        assert b["share"] < 0.5, "a 0.6-weight branch should not outvote 600 ratings"
+
+    def test_a_branch_with_no_reddit_claims_still_gets_an_answer(self) -> None:
+        v, cc, loc = self._with_branches()
+        v["branch_totals"] = {}
+        for p in loc["places"]:
+            p["city"] = "Somerville"
+        merged = site.build_payload(v, loc, cc)["merged"]
+        b = merged["branches"]["S0"]["Somerville"]
+        assert "r" not in b and b["share"] == 0.0
+
+    def test_a_pin_with_no_rating_contributes_nothing(self) -> None:
+        v, cc, loc = self._with_branches()
+        cc["locations"] = {}
+        merged = site.build_payload(v, loc, cc)["merged"]
+        assert merged["branches"]["S0"]["Somerville"]["share"] == 1.0
+
+    def test_the_merge_note_states_its_own_scope(self) -> None:
+        v, cc, loc = self._with_branches()
+        assert "category" in site.build_payload(v, loc, cc)["merged"]["note"]
+
+    def test_too_few_stores_to_calibrate_yields_no_merge(self) -> None:
+        cc = {"stores": {"S0": {"n": 500, "norm": 0.6, "thin": False}},
+              "locations": {}}
+        assert site.build_payload(self._verdicts(), None, cc)["merged"] is None
+
+
 class TestSlimCell:
     def test_keeps_the_numbers_the_ui_shows(self) -> None:
         got = site.slim_cell(cell())

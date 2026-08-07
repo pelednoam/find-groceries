@@ -112,6 +112,44 @@ interface CrossCheck {
   locations: Record<string, Rating>;
 }
 
+/** One combined estimate. Both inputs are kept so the reader can see what
+ *  went in — a merged number that hides its sources is a number you cannot
+ *  argue with. */
+interface MergedValue {
+  /** the combined estimate, on the -1..+1 sentiment scale */
+  v: number;
+  /** standard error of the combination */
+  se: number;
+  /** share of the weight that came from Reddit, 0..1 */
+  share: number;
+  /** calibrated Google minus Reddit */
+  gap: number;
+  /** the two still differ by more than 2 combined standard errors */
+  conflict: boolean;
+  /** Reddit input, absent when the branch has no claims */
+  r?: number;
+  /** Google input after calibration, absent when it has too few ratings */
+  g?: number;
+}
+
+interface MergeCalibration {
+  intercept: number;
+  slope: number;
+  /** out-of-sample residual — the floor on how precise a calibrated
+   *  Google value can ever be, however many ratings back it */
+  residual_sd: number;
+  n_stores: number;
+  r2: number;
+  loo_rmse: number;
+}
+
+interface MergeBlock {
+  calibration: MergeCalibration;
+  stores: Record<string, MergedValue>;
+  branches: Record<string, Record<string, MergedValue>>;
+  note: string;
+}
+
 interface Payload {
   generated_at: string;
   method: Method;
@@ -120,6 +158,9 @@ interface Payload {
   places_attribution: string;
   /** Google ratings, held beside the verdict and never merged into it. */
   crosscheck: CrossCheck | null;
+  /** Reddit and Google combined after an affine calibration. Overall only —
+   *  Google has no per-category opinion to merge. */
+  merged: MergeBlock | null;
   totals: Record<string, Totals>;
   /** store -> category -> cell */
   stores: Record<string, Record<string, Cell>>;

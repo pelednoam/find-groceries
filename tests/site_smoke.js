@@ -32,6 +32,7 @@ const dom = new JSDOM(fs.readFileSync(DOCS + "/index.html", "utf8"), {
 const { window } = dom;
 installLeafletStub(window);
 const payload = fs.readFileSync(DOCS + "/verdicts.json", "utf8");
+const payloadObj = JSON.parse(payload);
 window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(JSON.parse(payload)) });
 
 window.eval(fs.readFileSync(DOCS + "/app.js", "utf8"));
@@ -165,12 +166,15 @@ setTimeout(() => {
   const withGoogle = L.made.markers.filter(m =>
     (m.popup && m.popup.textContent || "").includes("Google")).length;
   ok(withGoogle > 100, "pins carry the Google rating", withGoogle);
-  $("#map-google").checked = true;
-  $("#map-google").dispatchEvent(new window.Event("change"));
-  ok(L.made.markers.length > 0 && L.made.markers.length <= total,
-     "colour-by-Google renders", L.made.markers.length);
-  $("#map-google").checked = false;
-  $("#map-google").dispatchEvent(new window.Event("change"));
+  for (const mode of ["merged", "google", "reddit"]) {
+    $("#map-colour").value = mode;
+    $("#map-colour").dispatchEvent(new window.Event("change"));
+    ok(L.made.markers.length > 0 && L.made.markers.length <= total,
+       `colour by ${mode}`, L.made.markers.length);
+  }
+  const withMerged = L.made.markers.filter(m =>
+    (m.popup && m.popup.textContent || "").includes("combined")).length;
+  ok(withMerged > 50, "pins carry the combined estimate", withMerged);
 
   const before = L.made.markers.length;
   $("#map-store").value = "Market Basket";
@@ -187,6 +191,41 @@ setTimeout(() => {
   ok(L.made.markers.length > 0, "colour-by-category still renders pins", L.made.markers.length);
   $("#map-cat").value = "";
   $("#map-cat").dispatchEvent(new window.Event("change"));
+
+  console.log("\n[merged estimate]");
+  const merged = payloadObj.merged;
+  ok(merged && merged.calibration.slope > 1, "calibration expands Google's range",
+     merged && merged.calibration.slope);
+  ok(merged.calibration.loo_rmse < 0.434,
+     "calibration beats guessing the mean, out of sample", merged.calibration.loo_rmse);
+  click($('[data-view="store"]'));
+  $("#store-pick").value = "Market Basket";
+  $("#store-pick").dispatchEvent(new window.Event("change"));
+  ok($("#store-body .merged") !== null, "combined estimate shown on the store page");
+  ok($("#store-body .mixbar") !== null, "the source mix is shown, not hidden");
+  const chainShare = $("#store-body .mixlab").textContent;
+  ok(/9\d% of the weight/.test(chainShare),
+     "Reddit dominates a well-evidenced chain", chainShare.slice(0, 60));
+  console.log("        chain: " + chainShare.replace(/\s+/g, " ").slice(0, 90));
+
+  // A thin branch is where the merge is supposed to move the number.
+  $("#branch-pick").value = "Chelsea";
+  $("#branch-pick").dispatchEvent(new window.Event("change"));
+  ok($("#store-body .merged") !== null, "branch-level combined estimate");
+  console.log("        branch: " + $("#store-body .mixlab").textContent.replace(/\s+/g," ").slice(0,90));
+
+  click($('[data-view="compare"]'));
+  // Reset the filters this test set earlier, or the row count is the
+  // previous section's leftovers rather than every store.
+  $("#cmp-cat").value = "";
+  $("#cmp-min").value = "0";
+  $("#cmp-min").dispatchEvent(new window.Event("input"));
+  const rows2 = $$("#cmp-table tbody tr");
+  const combinedCells = rows2.filter(
+    r => r.children[4] && r.children[4].textContent !== "–").length;
+  ok(rows2.length === 21, "all stores listed again", rows2.length);
+  ok(combinedCells === 20,
+     "every store with Google data has a combined figure", combinedCells);
 
   console.log("\n[item search]");
   click($('[data-view="items"]'));

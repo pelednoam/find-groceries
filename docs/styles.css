@@ -223,3 +223,18 @@ footer { padding: 18px 20px 40px; color: var(--muted); font-size: 0.84rem; }
 .legend .dot.google { background: var(--warn); }
 .gap-big { color: var(--bad); font-weight: 600; }
 .pin .cross { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+
+/* ── merged estimate ──────────────────────────────────────────────── */
+.merged { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.merged-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.merged-head .score { font-size: 1.35rem; }
+.mixbar {
+  display: flex; height: 7px; border-radius: 4px; overflow: hidden;
+  margin: 9px 0 5px; background: var(--line);
+}
+.mix.reddit { background: var(--accent); }
+.mix.google { background: var(--warn); }
+.mixlab {
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 0.8rem; color: var(--muted); flex-wrap: wrap;
+}

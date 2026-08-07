@@ -517,6 +517,31 @@ def totals_from(
     return dict(totals)
 
 
+def branch_totals_from(
+    cells: Mapping[CellKey, Cell], shopping_only: bool = True
+) -> dict[tuple[str, str], Totals]:
+    """Sum branch cells per (store, branch).
+
+    Same rollup as `totals_from`, one level down. A branch needs its own
+    headline number before it can be compared against anything else measured
+    at that branch — a per-location star rating, for instance.
+    """
+    from .extract import NON_SHOPPING_CATEGORIES
+
+    totals: dict[tuple[str, str], Totals] = defaultdict(Totals)
+    for (store, location, category), cell in cells.items():
+        if not location:
+            continue
+        if shopping_only and category in NON_SHOPPING_CATEGORIES:
+            continue
+        t = totals[(store, location)]
+        t.n += cell.n
+        t.weight += cell.weight
+        t.score += cell.score
+        t.valenced_weight += cell.valenced_weight
+    return dict(totals)
+
+
 def _cell_view(cell: Cell, max_examples: int) -> dict[str, Any]:
     level = cell.price_level()
     return {
@@ -567,6 +592,21 @@ def aggregate(
             cell, max_examples
         )
 
+    # Branch-level headline numbers, built the same way as the chain ones so
+    # a branch can be compared against anything else measured at that branch.
+    # Display names come from the cells, so "somerville" reads "Somerville".
+    branch_view: dict[str, dict[str, Any]] = {}
+    labels: dict[tuple[str, str], str] = {}
+    for (store, location, _cat), cell in cells.items():
+        if location:
+            labels.setdefault((store, location), cell.label(location))
+    for (store, location), t in branch_totals_from(cells).items():
+        branch_view.setdefault(store, {})[labels[(store, location)]] = {
+            "n_claims": t.n,
+            "weighted_evidence": round(t.weight, 2),
+            "sentiment": round(t.sentiment(), 3),
+        }
+
     item_index: dict[str, dict[str, Any]] = {}
     for key, cell in items.items():
         if cell.weight < min_weight:
@@ -594,6 +634,7 @@ def aggregate(
         "stores": stores,
         "branches": branches,
         "items": item_index,
+        "branch_totals": branch_view,
         "store_totals": {
             store: {
                 "n_claims": t.n,

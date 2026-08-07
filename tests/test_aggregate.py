@@ -481,6 +481,35 @@ class TestChainRollup:
         }
 
 
+class TestBranchTotals:
+    def test_rolls_a_branch_up_across_categories(self) -> None:
+        cells, _ = aggregate.build(
+            [claim(location="Somerville"),
+             claim(location="Somerville", category="meat", claim="x")], NOW
+        )
+        got = aggregate.branch_totals_from(cells)
+        assert got[("Market Basket", "somerville")].n == 2
+
+    def test_unlocated_claims_are_not_a_branch(self) -> None:
+        cells, _ = aggregate.build([claim(location="")], NOW)
+        assert aggregate.branch_totals_from(cells) == {}
+
+    def test_company_claims_are_excluded_like_the_chain_rollup(self) -> None:
+        cells, _ = aggregate.build(
+            [claim(location="Somerville", category="labor_ethics"),
+             claim(location="Somerville", category="produce", claim="x")], NOW
+        )
+        assert aggregate.branch_totals_from(cells)[("Market Basket", "somerville")].n == 1
+        assert aggregate.branch_totals_from(cells, shopping_only=False)[
+            ("Market Basket", "somerville")].n == 2
+
+    def test_reaches_the_verdict_document_with_a_readable_name(self) -> None:
+        out = aggregate.aggregate(
+            [claim(location="Somerville")], now=NOW, min_weight=0.0
+        )
+        assert out["branch_totals"]["Market Basket"]["Somerville"]["n_claims"] == 1
+
+
 class TestTotalsFrom:
     def test_company_claims_are_excluded_from_the_headline(self) -> None:
         cells, _ = aggregate.build(
