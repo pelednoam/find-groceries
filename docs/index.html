@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where to buy groceries — Cambridge, MA</title>
+<meta name="description" content="Grocery store price and quality signals for Cambridge and Boston, aggregated from 9.6M Reddit posts and comments.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛒</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>🛒 Where to buy groceries</h1>
+    <p class="sub">Cambridge &amp; Boston, from <span id="corpus-line">Reddit</span>.
+      <button type="button" class="linkish" data-view="method">How this works &amp; what it isn't</button>
+    </p>
+  </div>
+</header>
+
+<nav class="wrap tabs" role="tablist">
+  <button role="tab" data-view="list" class="on">Shopping list</button>
+  <button role="tab" data-view="compare">Compare stores</button>
+  <button role="tab" data-view="store">Store detail</button>
+  <button role="tab" data-view="items">Item search</button>
+  <button role="tab" data-view="method">Method</button>
+</nav>
+
+<main class="wrap">
+  <p id="loading">Loading data…</p>
+
+  <!-- ── Shopping list ─────────────────────────────────────────────── -->
+  <section id="view-list" class="view" hidden>
+    <div class="grid2">
+      <div>
+        <label for="list-input"><strong>Your shopping list</strong>
+          <span class="hint">one item per line, or comma separated</span></label>
+        <textarea id="list-input" rows="9" spellcheck="false"
+          placeholder="milk&#10;chicken&#10;produce&#10;bread&#10;coffee"></textarea>
+        <div class="row">
+          <button id="list-go" class="primary">Where should I go?</button>
+          <button id="list-demo" class="ghost">Try an example</button>
+        </div>
+        <label class="slider-label" for="pref">
+          What matters more?
+          <output id="pref-out">balanced</output>
+        </label>
+        <input type="range" id="pref" min="0" max="100" value="50">
+        <div class="slider-ends"><span>cheapest</span><span>best quality</span></div>
+      </div>
+      <div id="list-result" class="result"></div>
+    </div>
+    <div id="list-detail"></div>
+  </section>
+
+  <!-- ── Compare ───────────────────────────────────────────────────── -->
+  <section id="view-compare" class="view" hidden>
+    <div class="controls">
+      <label>Category
+        <select id="cmp-cat"><option value="">overall</option></select>
+      </label>
+      <label>Minimum evidence
+        <input type="range" id="cmp-min" min="0" max="60" value="0">
+        <output id="cmp-min-out">any</output>
+      </label>
+      <label class="check"><input type="checkbox" id="cmp-thin"> hide thin stores</label>
+    </div>
+    <div id="scatter-wrap">
+      <svg id="scatter" viewBox="0 0 640 420" role="img"
+           aria-label="Price against quality for each store"></svg>
+    </div>
+    <table id="cmp-table" class="data">
+      <thead><tr>
+        <th data-sort="store">Store</th>
+        <th data-sort="price" class="num">Price</th>
+        <th data-sort="quality" class="num">Quality</th>
+        <th data-sort="sentiment" class="num">Overall</th>
+        <th data-sort="n" class="num">Claims</th>
+        <th data-sort="w" class="num">Evidence</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ── Store detail ──────────────────────────────────────────────── -->
+  <section id="view-store" class="view" hidden>
+    <div class="controls">
+      <label>Store <select id="store-pick"></select></label>
+      <label>Branch <select id="branch-pick"><option value="">all branches</option></select></label>
+    </div>
+    <div id="store-body"></div>
+  </section>
+
+  <!-- ── Item search ───────────────────────────────────────────────── -->
+  <section id="view-items" class="view" hidden>
+    <div class="controls">
+      <label class="grow">Search <input type="search" id="item-q" placeholder="rotisserie chicken, key limes, seltzer…" spellcheck="false"></label>
+      <label>Store <select id="item-store"><option value="">any store</option></select></label>
+    </div>
+    <div id="item-body"></div>
+  </section>
+
+  <!-- ── Method ────────────────────────────────────────────────────── -->
+  <section id="view-method" class="view" hidden>
+    <div class="prose">
+      <h2>What this is</h2>
+      <p>Every number here comes from people talking on
+        <a href="https://reddit.com/r/boston">r/boston</a>,
+        <a href="https://reddit.com/r/CambridgeMA">r/CambridgeMA</a> and
+        <a href="https://reddit.com/r/Somerville">r/Somerville</a>. Nobody visited a
+        store, checked a shelf, or compared a receipt. It is aggregated opinion with
+        the receipts attached — every claim links back to the comment it came from,
+        and you should click through before believing anything surprising.</p>
+
+      <h2>What it is not</h2>
+      <ul>
+        <li><strong>Not prices.</strong> There is no price data here. "Cheap" means
+          people say it is cheap, which tracks reputation more than this week's shelf.</li>
+        <li><strong>Not a survey.</strong> Reddit is not a representative sample of
+          shoppers, and people post more readily about annoyance than satisfaction.</li>
+        <li><strong>Not current.</strong> Claims span <span id="m-span">many years</span>.
+          Older ones are down-weighted, faster for things that change quickly
+          (cleanliness, crowding) than for structural price gaps.</li>
+        <li><strong>Not independent.</strong> One thread can contain many voices
+          agreeing with each other. Caps limit how much one document or one author
+          contributes, but a local consensus is still one consensus.</li>
+      </ul>
+
+      <h2>How a number is built</h2>
+      <p>Each claim gets a weight from three things: how directly the text supports it,
+        how old it is, and how the comment was voted. Weights are summed per
+        (store, branch, category), then <em>shrunk toward neutral</em> so a cell with
+        one claim reads closer to 0 than a cell with forty saying the same thing.
+        A score near zero can mean "genuinely mixed" or "barely any evidence" — the
+        claim count next to it tells you which.</p>
+      <p>Price is scored on a line from cheap to expensive rather than by majority
+        vote, and is left blank entirely when there is too little to tell. One person
+        calling a store cheap is not enough to label it.</p>
+      <p>One-off events — a closing-down sale, a pandemic stock-out — are tagged at
+        extraction time and excluded, so a liquidation does not make a store look cheap.</p>
+
+      <h2>Provenance</h2>
+      <dl id="m-prov"></dl>
+      <p class="fineprint">Claim text is written by Reddit users and reproduced here
+        as plain text. It is opinion, not fact, and not the view of the businesses named.
+        Source: <a href="https://github.com/pelednoam/find-groceries">github.com/pelednoam/find-groceries</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <span id="footer-line"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
