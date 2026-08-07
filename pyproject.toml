@@ -1,0 +1,33 @@
+[project]
+name = "groceries"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["anthropic", "requests"]
+
+[tool.setuptools.packages.find]
+include = ["groceries*"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+files = ["groceries", "tests", "scripts/select_evaluative.py",
+         "scripts/extract_claims.py", "scripts/aggregate_claims.py",
+         "scripts/fetch_reddit_dumps.py", "scripts/verify_reddit_dumps.py",
+         "scripts/store_mention_census.py"]
+
+[[tool.mypy.overrides]]
+module = ["anthropic.*"]
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=groceries --cov-report=term-missing --cov-fail-under=99"
+
+[tool.coverage.run]
+branch = true
+source = ["groceries"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "\\.\\.\\."]

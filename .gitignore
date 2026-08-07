@@ -1,0 +1,26 @@
+# Fetched corpus and derived data — 1.6GB of Reddit dumps plus extraction
+# output. Regenerable from scripts/; never belongs in version control.
+data/
+
+# Local environment
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Credentials — nothing here should ever be committed, but be explicit.
+.env
+*.pem
+credentials
+
+# Vendored multi-model review agent (installed from its own repo)
+scripts/preflight/
+scripts/review_loop/
+scripts/review_*.py
+scripts/scrub_diff.py
+scripts/validate_review_results.py
+docs/ensemble_review_result_schema.json
+.claude/
