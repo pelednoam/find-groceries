@@ -515,7 +515,8 @@ class TestPayload:
     def test_has_every_view_the_ui_needs(self) -> None:
         payload = site.build_payload(verdicts())
         for key in ("generated_at", "method", "corpus", "totals", "stores",
-                    "branches", "regions", "items", "keywords", "categories"):
+                    "branches", "regions", "items", "keywords", "categories",
+                    "receipts"):
             assert key in payload, key
 
     def test_thin_items_are_dropped(self) -> None:

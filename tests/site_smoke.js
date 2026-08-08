@@ -236,8 +236,87 @@ setTimeout(() => {
 
 function finish() {
   ok($("#item-body").textContent.includes("Nobody discussed"), "empty search handled");
+  receiptRun();
   console.log(failures === 0 ? "\nALL PASS (view tests)" : `\n${failures} FAILURE(S)`);
   xssRun();
+}
+
+/* A real till slip, warts and all: brand prefixes, dropped vowels, the
+ * register header, the totals. Nothing here may reach the network, and
+ * nothing but the matched name may reach storage. */
+const RECEIPT = [
+  "MARKET BASKET #21",
+  "ST# 02175 OP# 000123 TE# 09 TR# 04412",
+  "08/01/2026 14:22",
+  "GV WHL MLK GAL           3.28",
+  "CHKN BRST BNLS SKNLS     9.41",
+  "ORG BBY SPNCH 5OZ        4.98",
+  "BRD WHT                  2.79",
+  "COF GRND 12OZ            8.49",
+  "QWXZ MYSTERY ITEM        1.11",
+  "SUBTOTAL                29.95",
+  "TAX 1  6.25%             0.00",
+  "TOTAL                   29.95",
+  "DEBIT TEND              29.95",
+  "THANK YOU FOR SHOPPING",
+].join("\n");
+
+function receiptRun() {
+  console.log("\n[receipt scanning]");
+  window.localStorage.clear();
+
+  let fetched = 0;
+  const realFetch = window.fetch;
+  window.fetch = (...a) => { fetched++; return realFetch(...a); };
+
+  click($("#scan-open"));
+  ok(!$("#scan-modal").hidden, "scanner opens");
+
+  $("#scan-text").value = RECEIPT;
+  click($("#scan-run"));
+
+  const lines = $$("#scan-lines li");
+  ok(lines.length >= 5, "receipt lines parsed", lines.length);
+  const names = lines.map((li) => li.querySelector(".rv-name").textContent);
+  ok(!names.some((n) => /total|tax|debit|thank/i.test(n)),
+    "totals and payment lines skipped", names.join(" | "));
+  // "CHKN BRST" resolves to "chicken breast" rather than "chicken" — the
+  // longest match wins, which is the point of matching at all.
+  ok(names.includes("milk") && names.includes("chicken breast"),
+    "abbreviations expanded and matched to the most specific term", names.join(" | "));
+  console.log("        " + names.join(" | "));
+
+  const ticked = $$("#scan-lines .tick").filter((b) => b.checked);
+  ok(ticked.length >= 4, "matched lines start ticked", ticked.length);
+  ok(ticked.length < lines.length, "an unmatched line is left unticked");
+  ok(/Market Basket/.test($("#scan-hint").textContent), "the shop is recognised",
+    $("#scan-hint").textContent);
+
+  click($("#scan-save"));
+  ok($("#scan-modal").hidden, "scanner closes after saving");
+
+  const stored = window.localStorage.getItem("basket.receipts.v1");
+  ok(stored !== null, "the receipt is remembered");
+  ok(!/CHKN|BNLS|GV WHL|02175/.test(stored),
+    "only the matched names are stored, never the till text", String(stored).slice(0, 90));
+  ok(JSON.parse(stored)[0].at < Date.now() / 1000 - 86400,
+    "the receipt's own date is used, not today's");
+  ok(fetched === 0, "nothing was sent anywhere", fetched);
+  window.fetch = realFetch;
+
+  ok(!$("#learned-panel").hidden, "the habits panel appears");
+  const learned = $$("#learned-list li").map((li) => li.querySelector(".lr-name").textContent);
+  ok(learned.length >= 4, "habits listed", learned.join(" | "));
+  const inBasket = $$("#basket-list li .name > span:first-child").map((s) => s.textContent);
+  ok(inBasket.includes("milk") && inBasket.includes("chicken breast"),
+    "the basket is rebuilt from the receipt", inBasket.join(" | "));
+  ok(!inBasket.includes("produce"),
+    "the example basket is replaced, not added to", inBasket.join(" | "));
+  ok($$("#list-result .trow").length > 0, "stores re-ranked on the learned basket");
+
+  click($("#history-clear"));
+  ok($("#learned-panel").hidden, "clearing hides the habits");
+  ok(window.localStorage.getItem("basket.receipts.v1") === null, "clearing forgets the receipt");
 }
 
 /* Hostile data arriving from the server is the real threat model, so poison

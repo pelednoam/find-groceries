@@ -198,6 +198,8 @@ interface Payload {
   items: Record<string, Record<string, Cell>>;
   /** shopping-list word -> category */
   keywords: Record<string, string>;
+  /** vocabulary for reading a till slip, from groceries/receipts.py */
+  receipts: ReceiptVocabulary;
   categories: string[];
 }
 

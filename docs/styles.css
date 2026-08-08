@@ -488,3 +488,83 @@ footer {
   border-top: 1px solid var(--line); padding: 26px 22px 60px;
   text-align: center; font-size: 12.5px; color: var(--faint);
 }
+
+/* ── receipt scanning ─────────────────────────────────────────────── */
+.panel.dark { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.scan-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+.scan-icon {
+  width: 26px; height: 26px; border-radius: 8px; background: var(--accent);
+  color: var(--accent-ink); display: grid; place-items: center; font-size: 13px; flex: none;
+}
+.panel.dark h2 { font-size: 16px; margin: 0; color: var(--paper); }
+.scan-copy { font-size: 13.5px; line-height: 1.55; color: color-mix(in srgb, var(--paper) 66%, transparent); margin: 0 0 14px; }
+.scan-cta {
+  width: 100%; border: 0; cursor: pointer; background: var(--paper); color: var(--ink);
+  border-radius: 11px; padding: 11px; font: 600 14px var(--sans);
+  transition: background .15s, color .15s;
+}
+.scan-cta:hover { background: var(--accent); color: var(--accent-ink); }
+.scan-cta.ghost { background: none; border: 1px solid var(--line); color: var(--ink); }
+.scan-cta.ghost:hover { border-color: var(--accent); color: var(--accent); background: none; }
+.scan-status { font-size: 11.5px; color: color-mix(in srgb, var(--paper) 48%, transparent); margin-top: 10px; }
+
+ul.learned { list-style: none; margin: 0; padding: 0; }
+ul.learned li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 13.5px;
+}
+ul.learned li:last-child { border-bottom: 0; }
+ul.learned .lr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ul.learned .lr-track { width: 64px; height: 5px; background: var(--tray); border-radius: var(--pill); overflow: hidden; flex: none; }
+ul.learned .lr-fill { display: block; height: 100%; background: var(--accent); }
+ul.learned .lr-meta {
+  width: 92px; text-align: right; flex: none;
+  font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+
+.modal { position: fixed; inset: 0; z-index: 70; background: rgb(36 31 28 / .45); display: grid; place-items: center; padding: 22px; }
+.modal-card {
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 20px;
+  padding: 24px; width: min(520px, 100%); max-height: 88vh; overflow-y: auto;
+}
+.modal-card h2 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.015em; }
+.modal-card h3 { font-size: 15px; margin: 18px 0 8px; }
+.modal-copy { font-size: 14px; line-height: 1.55; color: var(--body); margin: 0 0 16px; }
+.dropzone {
+  border: 1.5px dashed var(--dash); border-radius: 15px; padding: 30px 20px;
+  text-align: center; background: var(--card); margin-bottom: 14px; cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--accent-wash); }
+.dz-icon { font-size: 26px; line-height: 1; margin-bottom: 9px; color: var(--dash); }
+.dz-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.dz-sub { font-size: 12.5px; color: var(--faint); }
+.paste summary { cursor: pointer; font-size: 13px; color: var(--body); margin-bottom: 8px; }
+.paste textarea {
+  width: 100%; border: 1px solid var(--line); background: var(--card);
+  border-radius: 10px; padding: 10px 12px; font: 400 12.5px var(--mono);
+  color: var(--ink); resize: vertical;
+}
+.scan-progress { margin: 14px 0 0; }
+.scan-progress .bar-track { height: 6px; background: var(--tray); border-radius: var(--pill); overflow: hidden; }
+ul.review { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+ul.review li {
+  display: flex; align-items: center; gap: 10px; padding: 8px 0;
+  border-bottom: 1px solid var(--line-soft); font-size: 13.5px;
+}
+ul.review .tick { accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
+ul.review .rv-body { flex: 1; min-width: 0; }
+ul.review .rv-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ul.review .rv-raw { display: block; font: 400 11px var(--mono); color: var(--fainter); }
+/* A line we could not match to anything people discuss is still shown —
+   the reader knows their own receipt better than the parser does. */
+ul.review li.miss .rv-name { color: var(--faint); font-style: italic; }
+ul.review .rv-qty, ul.review .rv-price {
+  flex: none; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+ul.review .rv-price { width: 54px; text-align: right; }
+
+/* Once a photo is staged the zone stops looking like an invitation. */
+.dropzone.loaded { border-style: solid; border-color: var(--accent); background: var(--accent-wash); }
+.dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.modal-open { overflow: hidden; }

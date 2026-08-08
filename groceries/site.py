@@ -23,6 +23,7 @@ from typing import Any, Final
 
 from .jsonl import write_atomic
 from .locations import attach_branches
+from .receipts import vocabulary as receipt_vocabulary
 from .merge import (
     Calibration,
     Cell,
@@ -524,6 +525,9 @@ def build_payload(
         "regions": regions,
         "items": items,
         "keywords": keyword_index(),
+        # The receipt parser runs in the browser so a photograph never leaves
+        # the reader's device; the vocabulary it needs travels with it.
+        "receipts": receipt_vocabulary(),
         "categories": sorted({c for cats in stores.values() for c in cats}),
     }
 

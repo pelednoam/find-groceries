@@ -1317,6 +1317,9 @@ async function boot(): Promise<void> {
   fillCalibrationProse();
   renderBasket();
   runList();
+  // Reads stored receipts and, if there are any, replaces the example
+  // basket with what this shopper actually buys.
+  initScanner();
 
   const go = (v: View): void => { switchView(v); renderView(v); };
   for (const b of all<HTMLElement>("[data-view]")) {
