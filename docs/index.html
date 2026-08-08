@@ -4,115 +4,140 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Basket — where to buy groceries in Cambridge</title>
-<meta name="description" content="Grocery store price and quality signals for Cambridge and Boston, aggregated from 9.6M Reddit posts and comments.">
-<meta name="theme-color" content="#0c1512">
+<meta name="description" content="Every grocery store in Cambridge, scored on your basket from what shoppers actually say. Reddit and Google, side by side, with the receipts attached.">
+<meta name="theme-color" content="#f2ede4">
 <!-- The "textContent, never innerHTML" rule is enforced in code and by test;
-     this makes the browser enforce it too. No inline script, no third-party
-     origin except OpenStreetMap tiles. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23c6f24e'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='800' text-anchor='middle' fill='%230c1512'>B</text></svg>">
+     this makes the browser enforce it too. Fonts are self-hosted, so the only
+     third-party origin is the OpenStreetMap tile server. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23d8462b'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='800' text-anchor='middle' fill='%23fff6f2'>B</text></svg>">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+
 <header>
   <div class="wrap">
     <div class="brandline">
       <span class="mark" aria-hidden="true">B</span>
-      <span class="brandname">Basket <span>/ Cambridge</span></span>
+      <span class="brandname"><b>Basket</b><span>Cambridge, MA</span></span>
     </div>
-
-    <span class="pill-tag"><b>New</b> Now reading Google reviews too</span>
-
-    <h1>Stop guessing <em>where to shop.</em></h1>
-
-    <p class="standfirst">Every grocery store in Cambridge, ranked by what
-      people who actually shop there say — <b id="corpus-line">from Reddit</b>,
-      cross-checked against 135,345 Google reviews, with the receipts attached.</p>
-
-    <dl class="tally" id="tally"></dl>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <div class="inner">
+        <button role="tab" data-view="list" class="on">Your basket</button>
+        <button role="tab" data-view="compare">Stores</button>
+        <button role="tab" data-view="cross">Reddit vs Google</button>
+        <button role="tab" data-view="map">Map</button>
+        <button role="tab" data-view="items">Items</button>
+        <button role="tab" data-view="method">Method</button>
+      </div>
+    </nav>
   </div>
 </header>
 
-<nav class="tabs" role="tablist">
-  <div class="inner">
-  <button role="tab" data-view="list" class="on">Shopping list</button>
-  <button role="tab" data-view="compare">Compare stores</button>
-  <button role="tab" data-view="map">Map</button>
-  <button role="tab" data-view="cross">Reddit vs Google</button>
-  <button role="tab" data-view="store">Store detail</button>
-  <button role="tab" data-view="items">Item search</button>
-  <button role="tab" data-view="method">Method</button>
-  </div>
-</nav>
-
 <main class="wrap">
-  <p id="loading">Loading data…</p>
+  <p id="loading">Loading…</p>
 
-  <!-- ── Shopping list ─────────────────────────────────────────────── -->
-  <section id="view-list" class="view" hidden>
-    <div class="grid2">
-      <div>
-        <label for="list-input"><strong>Your shopping list</strong>
-          <span class="hint">one item per line, or comma separated</span></label>
-        <textarea id="list-input" rows="9" spellcheck="false"
-          placeholder="milk&#10;chicken&#10;produce&#10;bread&#10;coffee"></textarea>
-        <div class="row">
-          <button id="list-go" class="primary">Where should I go?</button>
-          <button id="list-demo" class="ghost">Try an example</button>
-        </div>
-        <label class="slider-label" for="pref">
-          What matters more?
-          <output id="pref-out">balanced</output>
-        </label>
-        <input type="range" id="pref" min="0" max="100" value="50">
-        <div class="slider-ends"><span>cheapest</span><span>best quality</span></div>
-      </div>
-      <div id="list-result" class="result"></div>
+  <!-- ── Your basket ─────────────────────────────────────────────── -->
+  <section id="view-list" class="view basket-view" hidden>
+    <div class="hero">
+      <span class="pill-tag"><b>NEW</b> Google reviews now cross-checked against Reddit</span>
+      <h1>Your list. Every store.<br><em>One honest ranking.</em></h1>
+      <p class="standfirst">Put in what you actually buy. Basket scores every
+        grocery store in Cambridge on your list — how well regarded it is for
+        those things, how it reads on price, and how much of your list it has
+        evidence for.
+        <button type="button" class="linkish" data-view="method">Where the numbers come from</button>.</p>
     </div>
-    <div id="list-detail"></div>
+
+    <div class="split">
+      <aside>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Your basket</h2>
+            <span id="basket-count"></span>
+          </div>
+          <form class="add-row" id="add-form">
+            <input id="list-input" placeholder="Add an item…" spellcheck="false"
+                   aria-label="Add an item to your basket">
+            <button type="submit">Add</button>
+          </form>
+          <ul class="basket" id="basket-list"></ul>
+          <div class="suggest-label">Common around here</div>
+          <div class="chips" id="suggestions"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head" style="margin-bottom:6px">
+            <h2 style="font-size:16px">What matters more</h2>
+            <span id="pref-out"></span>
+          </div>
+          <input type="range" id="pref" min="0" max="100" value="50"
+                 aria-label="Weight price against quality">
+          <div style="display:flex;justify-content:space-between;font-size:11px;
+                      letter-spacing:.06em;text-transform:uppercase;color:var(--fainter);margin-top:4px">
+            <span>cheapest</span><span>best rated</span>
+          </div>
+          <button id="list-go" hidden>Re-rank</button>
+        </div>
+      </aside>
+
+      <section>
+        <div class="results-head">
+          <div>
+            <h2 id="results-title">Stores, scored on your basket</h2>
+            <p>Rankings come from what people wrote, not from a register.
+              There are no prices here — “cheap” means people say it is cheap.</p>
+          </div>
+          <div class="segmented" id="sorts"></div>
+        </div>
+
+        <div class="controls">
+          <label>Minimum evidence
+            <input type="range" id="cmp-min" min="0" max="60" value="0">
+            <b><output id="cmp-min-out">any</output></b>
+          </label>
+          <label><input type="checkbox" id="cmp-thin"> Hide thin evidence</label>
+          <span class="right">Category
+            <select id="cmp-cat"><option value="">overall</option></select>
+          </span>
+        </div>
+
+        <div id="list-result" class="result"></div>
+        <div id="list-detail"></div>
+      </section>
+    </div>
   </section>
 
-  <!-- ── Compare ───────────────────────────────────────────────────── -->
+  <!-- ── Stores ──────────────────────────────────────────────────── -->
   <section id="view-compare" class="view" hidden>
-    <div class="controls">
-      <label>Category
-        <select id="cmp-cat"><option value="">overall</option></select>
-      </label>
-      <label>Minimum evidence
-        <input type="range" id="cmp-min" min="0" max="60" value="0">
-        <output id="cmp-min-out">any</output>
-      </label>
-      <label class="check"><input type="checkbox" id="cmp-thin"> hide thin stores</label>
-    </div>
+    <h1 style="font-size:36px;margin:0 0 8px">Every store, and what people say</h1>
+    <p class="standfirst" style="margin-bottom:26px">Reddit is opinionated and
+      Google is polite. Where the two disagree is usually the interesting part.</p>
     <div id="scatter-wrap">
       <svg id="scatter" viewBox="0 0 640 420" role="img"
            aria-label="Price against quality for each store"></svg>
     </div>
-    <div class="scroll-x"><table id="cmp-table" class="data">
-      <thead><tr>
-        <th data-sort="store">Store</th>
-        <th data-sort="price" class="num">Price</th>
+    <div class="table" style="margin-bottom:22px">
+      <div class="thead grid-row">
+        <div>Store</div><div>Price</div><div>Quality</div><div>Overall</div><div>Claims</div>
+      </div>
+      <table id="cmp-table"><thead><tr>
+        <th data-sort="store">Store</th><th data-sort="price" class="num">Price</th>
         <th data-sort="quality" class="num">Quality</th>
-        <th data-sort="sentiment" class="num">Reddit</th>
-        <th class="num">Combined</th>
-        <th data-sort="n" class="num">Claims</th>
-        <th data-sort="w" class="num">Evidence</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table></div>
+        <th data-sort="sentiment" class="num">Overall</th>
+        <th data-sort="n" class="num">Claims</th><th data-sort="w" class="num">Evidence</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div class="cards" id="store-cards"></div>
   </section>
 
-  <!-- ── Cross-check ───────────────────────────────────────────────── -->
+  <!-- ── Reddit vs Google ────────────────────────────────────────── -->
   <section id="view-cross" class="view" hidden>
-    <div class="prose" style="max-width:none">
-      <p>Two sources, deliberately <strong>not</strong> averaged. Reddit is
-      comparative and skews toward complaint; Google reviewers are
-      self-selected customers of the shop they are rating. Averaging them
-      would quietly rehabilitate exactly the stores the corpus is hardest on,
-      and the result would look like new evidence rather than a change of
-      source mix.</p>
-    </div>
+    <h1 style="font-size:36px;margin:0 0 8px">Reddit vs Google</h1>
+    <p class="standfirst" style="margin-bottom:22px">Two sources, deliberately
+      not averaged. Reddit is comparative and skews toward complaint; Google
+      reviewers are self-selected customers of the shop they are rating.</p>
     <div class="controls">
       <label>Google population
         <select id="cross-pop">
@@ -121,203 +146,142 @@
           <option value="norm_long">only reviews with a paragraph</option>
         </select>
       </label>
-      <output id="cross-summary" class="muted"></output>
+      <output id="cross-summary" class="right"></output>
     </div>
     <div class="legend">
-      <span><i class="dot reddit"></i>Reddit verdict (this pipeline)</span>
-      <span><i class="dot google"></i>Google rating, normalised to the same scale</span>
+      <span><i class="dot reddit"></i>Reddit verdict</span>
+      <span><i class="dot google"></i>Google, normalised to the same scale</span>
     </div>
     <div id="cross-chart-wrap">
       <svg id="cross-chart" viewBox="0 0 640 560" role="img"
            aria-label="Reddit verdict against Google rating for each store"></svg>
     </div>
-    <div class="scroll-x"><table id="cross-table" class="data">
-      <thead><tr>
-        <th>Store</th>
-        <th class="num">Reddit</th>
-        <th class="num">Google</th>
-        <th class="num">Gap</th>
-        <th class="num">★ mean</th>
-        <th class="num">Ratings</th>
-        <th class="num">after decay</th>
-        <th class="num">Median</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table></div>
+    <div class="table">
+      <table id="cross-table"><thead><tr>
+        <th>Store</th><th class="num">Reddit</th><th class="num">Google</th>
+        <th class="num">Gap</th><th class="num">★ mean</th><th class="num">Ratings</th>
+        <th class="num">after decay</th><th class="num">Median</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
     <p class="fineprint" id="cross-cite"></p>
   </section>
 
-  <!-- ── Map ───────────────────────────────────────────────────────── -->
+  <!-- ── Map ─────────────────────────────────────────────────────── -->
   <section id="view-map" class="view" hidden>
+    <h1 style="font-size:36px;margin:0 0 8px">What's actually near you</h1>
+    <p class="standfirst" style="margin-bottom:22px">Real locations from
+      OpenStreetMap. Pin colour follows how people rate the store.</p>
     <div class="controls">
       <label>Store <select id="map-store"><option value="">all stores</option></select></label>
-      <label>Colour by <select id="map-cat"><option value="">overall sentiment</option></select></label>
-      <label class="check"><input type="checkbox" id="map-evidence">
-        only branches with their own evidence</label>
-      <label>Colour source
-        <select id="map-colour">
-          <option value="reddit">Reddit verdict</option>
-          <option value="merged">combined estimate</option>
-          <option value="google">Google rating</option>
-        </select>
-      </label>
-      <output id="map-count" class="muted"></output>
+      <label>Colour by <select id="map-colour">
+        <option value="reddit">Reddit verdict</option>
+        <option value="merged">combined estimate</option>
+        <option value="google">Google rating</option>
+      </select></label>
+      <label>Category <select id="map-cat"><option value="">overall</option></select></label>
+      <label><input type="checkbox" id="map-evidence"> only branches with evidence</label>
+      <output id="map-count" class="right"></output>
     </div>
-    <div id="map"></div>
-    <p class="fineprint">
-      Pins are real store locations from OpenStreetMap, matched to a chain by
-      name. Colour is the verdict for the branch when this location could be
-      matched to one, and the chain otherwise — so two pins of the same chain
-      usually share a colour. <span id="map-attrib"></span>
-    </p>
+    <div class="split" style="grid-template-columns:1fr minmax(240px,320px)">
+      <div id="map"></div>
+      <div class="map-list" id="map-list"></div>
+    </div>
+    <p class="fineprint">Pins are matched to a chain by name; colour is the
+      branch verdict where this location could be matched to one, and the chain
+      otherwise. <span id="map-attrib"></span></p>
   </section>
 
-  <!-- ── Store detail ──────────────────────────────────────────────── -->
-  <section id="view-store" class="view" hidden>
-    <div class="controls">
-      <label>Store <select id="store-pick"></select></label>
-      <label>Branch <select id="branch-pick"><option value="">all branches</option></select></label>
-    </div>
-    <div id="store-body"></div>
-  </section>
-
-  <!-- ── Item search ───────────────────────────────────────────────── -->
+  <!-- ── Items ───────────────────────────────────────────────────── -->
   <section id="view-items" class="view" hidden>
+    <h1 style="font-size:36px;margin:0 0 8px">What's worth buying where</h1>
+    <p class="standfirst" style="margin-bottom:22px">Specific things people
+      named, and where they said to get them.</p>
     <div class="controls">
-      <label class="grow">Search <input type="search" id="item-q" placeholder="rotisserie chicken, key limes, seltzer…" spellcheck="false"></label>
+      <label style="flex:1 1 280px">Search
+        <input type="search" id="item-q" spellcheck="false"
+               placeholder="rotisserie chicken, key limes, seltzer…">
+      </label>
       <label>Store <select id="item-store"><option value="">any store</option></select></label>
     </div>
     <div id="item-body"></div>
   </section>
 
-  <!-- ── Method ────────────────────────────────────────────────────── -->
+  <!-- ── Method ──────────────────────────────────────────────────── -->
   <section id="view-method" class="view" hidden>
     <div class="prose">
-      <h2>What this is</h2>
-      <p>Every number here comes from people talking on
-        <a href="https://reddit.com/r/boston">r/boston</a>,
-        <a href="https://reddit.com/r/CambridgeMA">r/CambridgeMA</a> and
-        <a href="https://reddit.com/r/Somerville">r/Somerville</a>. Nobody visited a
-        store, checked a shelf, or compared a receipt. It is aggregated opinion with
-        the receipts attached — every claim links back to the comment it came from,
-        and you should click through before believing anything surprising.</p>
+      <h1 style="font-size:36px;margin:0 0 8px">How Basket knows</h1>
+      <p>Nothing here comes from a cash register. Basket reads what shoppers
+        wrote and turns it into signals — useful for ranking, useless for exact
+        money. There are no prices anywhere on this site: the price column is a
+        reputation score, not a total.</p>
+
+      <div class="stat-grid" id="m-stats"></div>
+
+      <ol class="stages">
+        <li><div><h3>Collect</h3><p>9.6 million posts and comments from
+          r/boston, r/CambridgeMA and r/Somerville, plus 135,345 Google reviews
+          of the same shops.</p></div></li>
+        <li><div><h3>Filter</h3><p>Keep only the 0.3% that name a store and say
+          something evaluative about it.</p></div></li>
+        <li><div><h3>Extract</h3><p>Read each one with a language model into
+          structured claims — which store, which department, positive or
+          negative, cheap or dear.</p></div></li>
+        <li><div><h3>Weigh</h3><p>Score every claim by how directly the text
+          supports it, how old it is, and how it was voted, then roll them up
+          per store, per branch and per item.</p></div></li>
+      </ol>
 
       <h2>What it is not</h2>
       <ul>
-        <li><strong>Not prices.</strong> There is no price data here. "Cheap" means
-          people say it is cheap, which tracks reputation more than this week's shelf.</li>
-        <li><strong>Not a survey.</strong> Reddit is not a representative sample of
-          shoppers, and people post more readily about annoyance than satisfaction.</li>
-        <li><strong>Not current.</strong> Claims span <span id="m-span">many years</span>.
+        <li><b>Not prices.</b> There is no price data here at all. “Cheap” means
+          people say it is cheap, which tracks reputation more than this week's
+          shelf.</li>
+        <li><b>Not a survey.</b> Reddit is not a representative sample of
+          shoppers, and people post more readily about annoyance than
+          satisfaction.</li>
+        <li><b>Not current.</b> Claims span <span id="m-span">many years</span>.
           Older ones are down-weighted, faster for things that change quickly
-          (cleanliness, crowding) than for structural price gaps.</li>
-        <li><strong>Not independent.</strong> One thread can contain many voices
-          agreeing with each other. Caps limit how much one document or one author
+          than for structural price gaps.</li>
+        <li><b>Not independent.</b> One thread can contain many voices agreeing
+          with each other. Caps limit how much one document or one author
           contributes, but a local consensus is still one consensus.</li>
       </ul>
 
-      <h2>How it works</h2>
-      <ol class="stages">
-        <li><b>Collect.</b> 9.6 million posts and comments from r/boston,
-          r/CambridgeMA and r/Somerville, plus 135,345 Google reviews of the
-          same shops.</li>
-        <li><b>Filter.</b> Keep only the 0.3% that name a store and say
-          something evaluative about it.</li>
-        <li><b>Extract.</b> Read each one with a language model into
-          structured claims — which store, which department, positive or
-          negative, cheap or dear.</li>
-        <li><b>Weigh.</b> Score every claim by how directly the text supports
-          it, how old it is, and how it was voted, then roll them up per
-          store, per branch and per item.</li>
-      </ol>
-
       <h2>How a number is built</h2>
-      <p>Each claim gets a weight from three things: how directly the text supports it,
-        how old it is, and how the comment was voted. Weights are summed per
-        (store, branch, category), then <em>shrunk toward neutral</em> so a cell with
-        one claim reads closer to 0 than a cell with forty saying the same thing.
-        A score near zero can mean "genuinely mixed" or "barely any evidence" — the
-        claim count next to it tells you which.</p>
-      <p>Price is scored on a line from cheap to expensive rather than by majority
-        vote, and is left blank entirely when there is too little to tell. One person
-        calling a store cheap is not enough to label it.</p>
-      <p>One-off events — a closing-down sale, a pandemic stock-out — are tagged at
-        extraction time and excluded, so a liquidation does not make a store look cheap.</p>
+      <p>Each claim gets a weight from three things: how directly the text
+        supports it, how old it is, and how the comment was voted. Weights are
+        summed per store, branch and category, then <em>shrunk toward neutral</em>
+        so a cell with one claim reads closer to 0 than a cell with forty saying
+        the same thing. A score near zero can mean “genuinely mixed” or “barely
+        any evidence” — the claim count beside it tells you which.</p>
 
-      <h2>Two sources, not averaged</h2>
-      <p>A second source sits beside the Reddit verdict: 135,345 Google Maps
-        ratings for these stores, from a research dataset that ends in
-        September 2021. It is shown on the
-        <button type="button" class="linkish" data-view="cross">Reddit vs Google</button>
-        tab and never merged into the numbers above.</p>
-      <p>The reason is that the two disagree in a patterned way. Google reads
-        about <strong>+0.41</strong> more positive overall, but the gap is
-        concentrated: the big chains people complain about here are rated
-        perfectly fine on Google (Stop &amp; Shop &minus;0.52 against +0.51),
-        while the specialty shops agree to within a few hundredths. Averaging
-        would selectively rehabilitate the stores this corpus is hardest on,
-        and the output would read as new evidence rather than as a change in
-        which source was doing the talking.</p>
-      <p>Both sides are aged at the same rate. The corpus decays old claims
-        faster for things that change quickly than for structural price gaps,
-        which works out to an effective half-life of about
-        <span id="m-hl">4.7</span> years for the headline number; the Google
-        side is decayed at exactly that, taken from the corpus rather than
-        picked. It barely moves the ratings — they drifted only +0.10 stars
-        across 2016&ndash;2021 — but it cuts their <em>weight</em> to roughly a
-        third, which is the honest treatment of evidence that stops in
-        September 2021. The "after decay" column is what those ratings are
-        worth today.</p>
-      <p>There is a second layer. Restrict Google to reviews whose author
-        wrote a paragraph — the population closest to a Reddit comment — and
-        the mean drops 0.36 stars, halving the gap. People tap five stars on
-        the way out and write prose when annoyed. Which Google number you
-        quote is itself a choice, so the tab lets you pick and shows both.</p>
-      <p class="fineprint">Only counts and averages are published from that
-        dataset. No Google review text, author name or user id appears
-        anywhere in this site or its data file.</p>
-
-      <h2>Combining the two</h2>
-      <p>The tab above shows the sources apart. The store pages also show them
-        <em>combined</em>, and the way that works is worth stating because the
-        obvious method is wrong.</p>
-      <p>Google's ratings are not shifted relative to the corpus so much as
-        <strong>compressed</strong>: they rank the stores nearly the same way
-        (r&nbsp;=&nbsp;+0.86) but occupy 31% of the range, bunched near the top
-        the way star ratings always are. So the correction is not an offset,
-        it is a rescale — <code id="m-cal"></code> — fitted across every store
-        that has both. Two parameters over twenty stores; leave-one-out error
-        <code id="m-loo"></code> against <code>0.434</code> for simply guessing
-        the average, so the map predicts stores it has not seen.</p>
-      <p>A literal per-store offset would have been twenty parameters for
-        twenty stores. It would fit perfectly, erase every disagreement by
-        construction, and hand back a "combined" figure identical to whichever
-        source it was anchored on. The rescale still corrects each store by a
-        different amount — <span id="m-range"></span> — because the correction
-        depends on where the store sits.</p>
-      <p>The two are then combined by inverse variance, which decides the mix
-        on its own. Whatever remains unexplained after calibration
-        (<code id="m-resid"></code>) is a floor on how precise a Google
-        estimate can be, no matter how many ratings back it — so Reddit keeps
-        almost all the weight wherever it has thousands of claims, and cedes
-        it where it has one. Across the branches that have both, Reddit's
-        share runs from 13% to 93%. Every combined number on this site shows
-        that split beneath it.</p>
-      <p>Google contributes one figure per shop, so the combination applies to
-        the <em>overall</em> verdict only. There is no Google opinion about a
-        store's produce, and none is invented.</p>
+      <h2>Combining the two sources</h2>
+      <p>Google's ratings rank the stores nearly as this corpus does
+        (r&nbsp;=&nbsp;+0.86) but occupy a third of the range, bunched near the
+        top the way star ratings always are. So the correction is a rescale
+        — <code id="m-cal"></code> — fitted across every store that has both,
+        with leave-one-out error <code id="m-loo"></code> against
+        <code>0.434</code> for guessing the average. A literal per-store offset
+        would have been twenty parameters for twenty stores: a perfect fit that
+        erases every disagreement and hands back whichever source it was
+        anchored on.</p>
+      <p>The two are then combined by inverse variance, which decides the mix on
+        its own. Whatever remains unexplained after calibration
+        (<code id="m-resid"></code>) floors how precise a Google estimate can be,
+        so this corpus keeps almost all the weight where it has thousands of
+        claims and cedes it where it has one.</p>
+      <p class="fineprint">Only counts and averages are published from the Google
+        dataset. No review text, author name or user id appears anywhere in this
+        site or its data file.</p>
 
       <h2>Provenance</h2>
       <dl id="m-prov"></dl>
-      <p class="fineprint">Claim text is written by Reddit users and reproduced here
-        as plain text. It is opinion, not fact, and not the view of the businesses named.
-        Source: <a href="https://github.com/pelednoam/find-groceries">github.com/pelednoam/find-groceries</a>.</p>
     </div>
   </section>
 </main>
 
 <footer>
-  <div class="wrap"><span id="footer-line"></span></div>
+  <span id="footer-line"></span>
 </footer>
 
 <script src="vendor/leaflet/leaflet.js"></script>

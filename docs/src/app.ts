@@ -13,6 +13,16 @@ let DATA: Payload | null = null;
 let cmpSort: { key: string; dir: number } = { key: "w", dir: -1 };
 let mapDrawn = false;
 
+/** The shopping list. Quantities weight how much each item matters to the
+ *  ranking — two of something you buy every week should count for more than
+ *  one of something you buy once. */
+interface BasketItem { name: string; qty: number; }
+let basket: BasketItem[] = [
+  { name: "milk", qty: 1 }, { name: "chicken", qty: 2 }, { name: "produce", qty: 1 },
+  { name: "bread", qty: 1 }, { name: "coffee", qty: 1 },
+];
+let sortMode: "value" | "quality" | "evidence" = "value";
+
 /** The payload after boot. Every view runs behind `boot()` resolving. */
 function data(): Payload {
   if (!DATA) throw new Error("data() before boot");
@@ -151,21 +161,28 @@ function bestFor(r: Resolution, pref: number): { store: string; v: number; hit: 
   return best;
 }
 
-/** Rank stores across the whole list. */
-function rankStores(terms: string[], pref: number): { ranked: Ranked[]; resolved: Resolution[] } {
-  const resolved = terms.map(resolve);
+/** Rank stores across the whole basket.
+ *
+ * Quantity is a weight, not a multiplier on a price: there are no prices
+ * here. Asking for two of something says it matters twice as much to you,
+ * so a store's score on it counts twice.
+ */
+function rankStores(items: BasketItem[], pref: number): { ranked: Ranked[]; resolved: Resolution[] } {
+  const qty = new Map(items.map((i) => [i.name, i.qty]));
+  const resolved = items.map((i) => resolve(i.name));
   const tally: Record<string, Ranked> = {};
   for (const store of Object.keys(data().stores)) {
     tally[store] = { store, score: 0, covered: 0, avg: 0, wins: [], weak: [] };
   }
   for (const r of resolved) {
     if (r.kind === "none") continue;
+    const w = qty.get(r.term) ?? 1;
     for (const [store, hit] of Object.entries(r.perStore)) {
       const t = tally[store];
       if (!t || hit.cell.w < MIN_W) continue;
       const v = value(hit.cell, pref);
-      t.score += v;
-      t.covered += 1;
+      t.score += v * w;
+      t.covered += w;
       if (v < -0.15) t.weak.push(r.term);
     }
     const best = bestFor(r, pref);
@@ -190,82 +207,222 @@ function prefLabel(v: number): string {
   return "best quality";
 }
 
+function basketCount(): string {
+  const items = basket.length;
+  const units = basket.reduce((a, b) => a + b.qty, 0);
+  return `${items} item${items === 1 ? "" : "s"}${units > items ? ` · ${units} units` : ""}`;
+}
+
+function addToBasket(name: string): void {
+  const clean = name.trim().toLowerCase();
+  if (!clean) return;
+  const found = basket.find((i) => i.name === clean);
+  if (found) found.qty += 1;
+  else basket.push({ name: clean, qty: 1 });
+  renderBasket();
+  runList();
+}
+
+function renderBasket(): void {
+  const ul = need("#basket-list");
+  clear(ul);
+  need("#basket-count").textContent = basketCount();
+
+  for (const item of basket) {
+    const resolved = resolve(item.name);
+    const li = el("li");
+    const name = el("span", { class: "name" });
+    name.append(el("span", { text: item.name }));
+    // Say what the term was actually matched against, so a shopper can see
+    // that "milk" was answered by the dairy aisle rather than by milk.
+    const label = resolved.kind === "none" ? "no evidence either way"
+      : resolved.kind === "category" ? "matched to " + titleCase(
+          Object.values(resolved.perStore)[0]?.label ?? "")
+      : "matched to an item people named";
+    name.append(el("span", { class: "matched", text: label }));
+    li.append(name);
+    li.append(el("span", { class: "qty", text: "×" + item.qty }));
+
+    const dec = el("button", { class: "step", type: "button",
+      "aria-label": `One fewer ${item.name}` }, "−");
+    dec.addEventListener("click", () => {
+      item.qty = Math.max(1, item.qty - 1); renderBasket(); runList();
+    });
+    const inc = el("button", { class: "step", type: "button",
+      "aria-label": `One more ${item.name}` }, "+");
+    inc.addEventListener("click", () => { item.qty += 1; renderBasket(); runList(); });
+    const drop = el("button", { class: "drop", type: "button",
+      "aria-label": `Remove ${item.name}` }, "×");
+    drop.addEventListener("click", () => {
+      basket = basket.filter((i) => i !== item); renderBasket(); runList();
+    });
+    li.append(dec, inc, drop);
+    ul.append(li);
+  }
+
+  // Suggestions come from the keyword map, so every one of them resolves.
+  const chips = need("#suggestions");
+  clear(chips);
+  const pool = Object.keys(data().keywords)
+    .filter((w) => !basket.some((i) => i.name === w))
+    .slice(0, 40);
+  for (const word of pool.filter((_, i) => i % 5 === 0).slice(0, 7)) {
+    const chip = el("button", { class: "chip-add", type: "button", text: "+ " + word });
+    chip.addEventListener("click", () => addToBasket(word));
+    chips.append(chip);
+  }
+}
+
+function prefLabelShort(v: number): string {
+  return prefLabel(v);
+}
+
 function runList(): void {
-  const terms = parseList(need<HTMLTextAreaElement>("#list-input").value);
   const out = need("#list-result");
   const detail = need("#list-detail");
   clear(out);
   clear(detail);
-  if (!terms.length) {
-    out.append(el("p", { class: "empty", text: "Add a few items and press the button." }));
+  if (!basket.length) {
+    out.append(el("p", { class: "empty",
+      text: "Add a few things and Basket will rank the stores on them." }));
     return;
   }
   const pref = Number(need<HTMLInputElement>("#pref").value) / 100;
-  const { ranked, resolved } = rankStores(terms, pref);
+  const minW = Number(need<HTMLInputElement>("#cmp-min").value);
+  const hideThin = need<HTMLInputElement>("#cmp-thin").checked;
+  const { ranked, resolved } = rankStores(basket, pref);
   const unmatched = resolved.filter((r) => r.kind === "none").map((r) => r.term);
+  const units = basket.reduce((a, b) => a + b.qty, 0);
 
-  if (!ranked.length) {
+  let rows = ranked.filter((t) => {
+    const totals = data().totals[t.store];
+    if (hideThin && totals?.thin) return false;
+    return (totals?.w ?? 0) >= minW;
+  });
+  if (sortMode === "quality") {
+    rows = [...rows].sort((a, b) => (data().totals[b.store]?.s ?? 0) - (data().totals[a.store]?.s ?? 0));
+  } else if (sortMode === "evidence") {
+    rows = [...rows].sort((a, b) => (data().totals[b.store]?.w ?? 0) - (data().totals[a.store]?.w ?? 0));
+  }
+
+  need("#results-title").textContent =
+    `${rows.length} store${rows.length === 1 ? "" : "s"}, scored on your basket`;
+
+  if (!rows.length) {
     out.append(el("p", { class: "empty",
       text: "Nothing on that list matches anything the corpus discusses." }));
+    return;
   }
 
-  ranked.slice(0, 4).forEach((t, i) => {
-    const card = el("div", { class: "card" + (i === 0 ? " win" : "") });
-    card.append(el("h3", {}, [
-      el("span", { text: t.store }),
-      el("span", { class: "rank", text: fmt(t.avg) }),
-    ]));
-    card.append(el("p", { class: "why",
-      text: `evidence for ${t.covered} of ${terms.length} item${terms.length === 1 ? "" : "s"}` }));
-    const badges = el("div", { class: "badges" });
-    for (const w of t.wins.slice(0, 6)) {
-      badges.append(el("span", { class: "badge good", text: "best for " + w }));
-    }
-    for (const w of t.weak.slice(0, 3)) {
-      badges.append(el("span", { class: "badge bad", text: "weak on " + w }));
-    }
-    if (badges.children.length) card.append(badges);
-    activatable(card, `${t.store}, combined score ${fmt(t.avg)}`,
-      () => showStore(t.store));
-    out.append(card);
+  const table = el("div", { class: "table" });
+  table.append(el("div", { class: "thead grid-row" }, [
+    el("div", { text: "Store" }),
+    el("div", { text: "On your list" }),
+    el("div", { text: "Price" }),
+    el("div", { text: "Covered" }),
+    el("div", { text: "Overall" }),
+  ]));
+
+  rows.forEach((t, i) => {
+    const totals = data().totals[t.store];
+    const price = data().stores[t.store]?.["price_overall"];
+    const row = el("button", {
+      class: "trow grid-row" + (i === 0 ? " top" : ""), type: "button",
+    });
+
+    const cell = el("div", { class: "store-cell" });
+    cell.append(el("span", { class: "rank-badge", text: String(i + 1) }));
+    const names = el("span", { style: "min-width:0" });
+    names.append(el("span", { class: "store-name", text: t.store }));
+    names.append(el("span", { class: "store-area",
+      text: `${(totals?.n ?? 0).toLocaleString()} claims` }));
+    cell.append(names);
+    row.append(cell);
+
+    const score = el("div");
+    score.append(el("span", { class: "big-figure score " + cls(t.avg), text: fmt(t.avg) }));
+    score.append(el("span", { class: "sub-figure muted",
+      text: t.wins.length ? "best for " + t.wins.slice(0, 2).join(", ") : "—" }));
+    row.append(score);
+
+    row.append(el("div", {}, price?.p
+      ? el("span", { class: "cell-num score " + (price.p === "cheap" ? "pos" : price.p === "expensive" ? "neg" : "mid"),
+          text: price.p })
+      : el("span", { class: "cell-num muted", text: "—" })));
+
+    const cover = el("div");
+    cover.append(el("span", { class: "cell-num", text: `${t.covered} of ${units}` }));
+    cover.append(el("span", { class: "sub-figure muted",
+      text: t.weak.length ? "weak on " + t.weak[0] : "no gaps found" }));
+    row.append(cover);
+
+    row.append(el("div", {}, el("span", {
+      class: "cell-num score " + cls(totals?.s ?? 0), text: fmt(totals?.s ?? 0) })));
+
+    row.addEventListener("click", () => openDetail(t.store));
+    table.append(row);
   });
+  out.append(table);
 
   if (unmatched.length) {
-    out.append(el("p", { class: "muted", text: "No evidence either way: " + unmatched.join(", ") }));
+    out.append(el("p", { class: "hidden-note",
+      text: "No evidence either way: " + unmatched.join(", ") }));
   }
 
-  // Per-item breakdown: the split shop, if you will make two stops.
-  const rows = resolved.filter((r) => r.kind !== "none");
-  if (!rows.length) return;
-  detail.append(el("h2", { text: "Item by item" }));
-  const table = el("table", { class: "data" });
-  table.append(el("thead", {}, el("tr", {}, [
-    el("th", { text: "Item" }),
-    el("th", { text: "Matched" }),
-    el("th", { text: "Best here" }),
-    el("th", { class: "num", text: "Score" }),
-    el("th", { class: "num", text: "Claims" }),
-  ])));
-  const body = el("tbody");
-  for (const r of rows) {
-    const best = bestFor(r, pref);
-    if (!best) continue;
-    const tr = el("tr", {}, [
-      el("td", { text: r.term }),
-      el("td", { class: "muted",
-        text: r.kind === "item" ? best.hit.label : titleCase(best.hit.label) }),
-      el("td", { text: best.store }),
-      el("td", { class: "num" }, el("span", { class: "score " + cls(best.v), text: fmt(best.v) })),
-      el("td", { class: "num muted", text: String(best.hit.cell.n) }),
+  // The two notes from the comp: a verdict, and whether a second stop pays.
+  const best = rows[0];
+  const second = rows[1];
+  const notes = el("div", { class: "notes" });
+  if (best) {
+    const totals = data().totals[best.store];
+    const note = el("div", { class: "note amber" });
+    note.append(el("h3", { text: `Shop at ${best.store} this week` }));
+    note.append(el("p", { text:
+      `Scores ${fmt(best.avg)} across your basket with evidence for `
+      + `${best.covered} of ${units} units, on ${(totals?.n ?? 0).toLocaleString()} `
+      + `claims. ${totals?.thin ? "Treat it carefully — the evidence is thin." : ""}` }));
+    notes.append(note);
+  }
+  if (best && second) {
+    const note = el("div", { class: "note" });
+    note.append(el("h3", { text: "Worth a second stop?" }));
+    const gap = best.avg - second.avg;
+    note.append(el("p", { text: best.weak.length
+      ? `${best.store} reads weak on ${best.weak.slice(0, 2).join(" and ")}. `
+        + `${second.store} is the next best overall — worth the detour if those matter this week.`
+      : gap < 0.08
+        ? `Not really. ${second.store} is within ${fmt(gap)} of ${best.store} on the same basket, `
+          + `so a second stop buys you very little.`
+        : `Probably not. ${best.store} leads ${second.store} by ${fmt(gap)} across your list.` }));
+    notes.append(note);
+  }
+  if (notes.children.length) detail.append(notes);
+
+  // Item by item, so the split shop is visible.
+  detail.append(el("h2", { text: "Item by item", style: "font-size:20px;margin:26px 0 12px" }));
+  const per = el("div", { class: "table" });
+  per.append(el("div", { class: "thead grid-row",
+    style: "grid-template-columns:1.4fr 1.2fr 1fr .8fr" }, [
+    el("div", { text: "Item" }), el("div", { text: "Matched to" }),
+    el("div", { text: "Best here" }), el("div", { text: "Score" }),
+  ]));
+  for (const r of resolved) {
+    if (r.kind === "none") continue;
+    const bestHit = bestFor(r, pref);
+    if (!bestHit) continue;
+    const tr = el("button", { class: "trow grid-row", type: "button",
+      style: "grid-template-columns:1.4fr 1.2fr 1fr .8fr" }, [
+      el("div", { text: r.term }),
+      el("div", { class: "muted",
+        text: r.kind === "item" ? bestHit.hit.label : titleCase(bestHit.hit.label) }),
+      el("div", { text: bestHit.store }),
+      el("div", {}, el("span", { class: "score " + cls(bestHit.v), text: fmt(bestHit.v) })),
     ]);
-    activatable(tr, `${r.term}: best at ${best.store}`, () => showStore(best.store));
-    body.append(tr);
+    tr.addEventListener("click", () => openDetail(bestHit.store));
+    per.append(tr);
   }
-  table.append(body);
-  detail.append(table);
+  detail.append(per);
 }
-
-/* ── view: compare ──────────────────────────────────────────────────── */
 
 interface CmpRow {
   store: string;
@@ -537,7 +694,6 @@ function renderCross(): void {
     `${cc.n_reviews.toLocaleString()} ratings, ${cc.coverage} · `
     + `Google reads ${fmt(mean)} vs the corpus on average`;
   need("#cross-cite").textContent = cc.citation;
-  need("#m-hl").textContent = cc.half_life_years.toFixed(1);
 
   for (const row of rows) {
     const tr = el("tr", {}, [
@@ -727,6 +883,29 @@ function renderMap(): void {
     shown += 1;
   }
 
+  const list = need("#map-list");
+  clear(list);
+  const seen = new Set<string>();
+  for (const place of data().places) {
+    if (wanted && place.store !== wanted) continue;
+    const key = place.store + "|" + (place.branch ?? "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (seen.size > 14) break;
+    const totals = data().totals[place.store];
+    const b = el("button", { type: "button" }, [
+      el("span", { class: "grow" }, [
+        el("span", { class: "t", text: place.store }),
+        el("span", { class: "s",
+          text: [place.branch, place.city].filter(Boolean).join(" · ") || place.address }),
+      ]),
+      el("span", { class: "score " + cls(totals?.s ?? 0), text: fmt(totals?.s ?? 0) }),
+      el("span", { class: "chev", text: "›" }),
+    ]);
+    b.addEventListener("click", () => openDetail(place.store, place.branch));
+    list.append(b);
+  }
+
   need("#map-count").textContent =
     `${shown} location${shown === 1 ? "" : "s"} of ${data().places.length}`;
   const attribution = data().places_attribution;
@@ -735,6 +914,158 @@ function renderMap(): void {
   // Leaflet measures the container on creation; if that happened while the
   // tab was hidden the tiles lay out against a zero-height box.
   setTimeout(() => map?.invalidateSize(), 0);
+}
+
+/* ── detail drawer ──────────────────────────────────────────────────── */
+
+let drawerOpen: HTMLElement[] = [];
+let lastFocus: Element | null = null;
+
+function closeDrawer(): void {
+  for (const node of drawerOpen) node.remove();
+  drawerOpen = [];
+  if (lastFocus instanceof HTMLElement) lastFocus.focus();
+}
+
+/** Everything known about one store, in a panel over the page.
+ *
+ * The comp puts the store's whole story here — both sources, the quotes, and
+ * how it does on the basket — rather than sending the reader to a separate
+ * view and losing their place. */
+function openDetail(store: string, branch?: string): void {
+  closeDrawer();
+  lastFocus = document.activeElement;
+  const totals = data().totals[store];
+  const cats = branch ? data().branches[store]?.[branch] ?? {} : data().stores[store] ?? {};
+  const rating = data().crosscheck?.stores[store];
+  const merged = branch
+    ? data().merged?.branches[store]?.[branch]
+    : data().merged?.stores[store];
+
+  const scrim = el("button", { class: "scrim", type: "button", "aria-label": "Close" });
+  scrim.addEventListener("click", closeDrawer);
+
+  const panel = el("aside", { class: "drawer", role: "dialog", "aria-modal": "true",
+    "aria-label": store, tabindex: "-1" });
+  const close = el("button", { class: "drawer-close", type: "button",
+    "aria-label": "Close" }, "×");
+  close.addEventListener("click", closeDrawer);
+  panel.append(close);
+
+  const branches = Object.keys(data().branches[store] ?? {});
+  panel.append(el("div", { class: "eyebrow",
+    text: branch ?? `${branches.length} branch${branches.length === 1 ? "" : "es"} with their own evidence` }));
+  panel.append(el("h2", { text: store }));
+
+  const pair = el("div", { class: "stat-pair" });
+  const a = el("div", { class: "stat" });
+  a.append(el("div", { class: "k", text: "This corpus" }));
+  a.append(el("div", { class: "v score " + cls(totals?.s ?? 0), text: fmt(totals?.s ?? 0) }));
+  a.append(el("div", { class: "n", text: `${(totals?.n ?? 0).toLocaleString()} claims` }));
+  pair.append(a);
+  const b = el("div", { class: "stat" });
+  b.append(el("div", { class: "k", text: "Google reviews" }));
+  b.append(el("div", { class: "v", text: rating ? rating.mean.toFixed(2) + "★" : "—" }));
+  b.append(el("div", { class: "n",
+    text: rating ? `${rating.n.toLocaleString()} to ${rating.last}` : "no ratings" }));
+  pair.append(b);
+  panel.append(pair);
+
+  if (merged) {
+    panel.append(el("h3", { text: "Combined" }));
+    panel.append(mergedBlock(merged, branch ? "this branch" : "chain"));
+  }
+
+  if (rating && totals) {
+    panel.append(el("h3", { text: "Reddit vs Google" }));
+    const box = el("div", { class: "boxed" });
+    box.append(sourceBar("Reddit", totals.s, "reddit"));
+    box.append(sourceBar("Google", rating.norm, "google"));
+    const gap = rating.norm - totals.s;
+    box.append(el("div", { class: "gap-note", text:
+      Math.abs(gap) < 0.15
+        ? "The two sources agree closely here."
+        : gap > 0
+          ? `Google reads ${fmt(gap)} kinder. Star ratings compress toward the top, `
+            + "and reviewers are self-selected customers of this shop."
+          : `This corpus reads ${fmt(-gap)} kinder than Google does — unusual.` }));
+    panel.append(box);
+  }
+
+  const ordered = Object.entries(cats).sort((x, y) => y[1].w - x[1].w);
+  const combined = branch
+    ? data().reviews?.branches[store]?.[branch]
+    : data().reviews?.categories[store];
+  if (ordered.length) {
+    panel.append(el("h3", { text: "By category" }));
+    for (const [name, cell] of ordered.slice(0, 8)) {
+      panel.append(cellBlock(name, cell, combined?.[name]));
+    }
+  }
+
+  const items = Object.entries(data().items[store] ?? {})
+    .sort((x, y) => y[1].w - x[1].w).slice(0, 6);
+  if (items.length) {
+    panel.append(el("h3", { text: "Your basket here" }));
+    const lines = el("div", { class: "lines" });
+    for (const [name, cell] of items) {
+      lines.append(el("div", {}, [
+        el("span", { text: name }),
+        el("span", { class: "score " + cls(cell.s), text: fmt(cell.s) }),
+      ]));
+    }
+    panel.append(lines);
+  }
+
+  panel.append(el("p", { class: "fineprint", text:
+    "Figures are weighted opinion, not measurements. Every quote links to the "
+    + "comment it came from." }));
+
+  document.body.append(scrim, panel);
+  drawerOpen = [scrim, panel];
+  panel.focus();
+}
+
+function sourceBar(label: string, value: number, kind: string): HTMLElement {
+  // -1..+1 mapped onto a 0-100% bar.
+  const pct = Math.round(((value + 1) / 2) * 100);
+  const row = el("div", { class: "bar-row" });
+  row.append(el("span", { class: "bar-label", text: label }));
+  const track = el("span", { class: "bar-track" });
+  track.append(el("span", { class: `bar-fill ${kind}`, style: `width:${pct}%` }));
+  row.append(track);
+  row.append(el("span", { class: "bar-value", text: fmt(value) }));
+  return row;
+}
+
+/** Store cards for the Stores view, straight from the comp. */
+function renderStoreCards(): void {
+  const wrap = need("#store-cards");
+  clear(wrap);
+  const stores = Object.keys(data().stores).sort((a, b) =>
+    (data().totals[b]?.w ?? 0) - (data().totals[a]?.w ?? 0));
+  for (const store of stores) {
+    const totals = data().totals[store];
+    const rating = data().crosscheck?.stores[store];
+    const card = el("button", { class: "store-card", type: "button" });
+    const top = el("div", { class: "top" });
+    top.append(el("h3", { text: store }));
+    top.append(el("span", { class: "score " + cls(totals?.s ?? 0), text: fmt(totals?.s ?? 0) }));
+    card.append(top);
+    const nBranch = Object.keys(data().branches[store] ?? {}).length;
+    card.append(el("div", { class: "meta",
+      text: `${(totals?.n ?? 0).toLocaleString()} claims · ${nBranch} branch${nBranch === 1 ? "" : "es"}` }));
+    const bars = el("div", { class: "bars" });
+    bars.append(sourceBar("Reddit", totals?.s ?? 0, "reddit"));
+    if (rating) bars.append(sourceBar("Google", rating.norm, "google"));
+    card.append(bars);
+    // The most strongly evidenced thing anyone said about this store.
+    const best = Object.values(data().stores[store] ?? {})
+      .flatMap((c) => c.e).slice(0, 1)[0];
+    if (best) card.append(el("p", { class: "quote", text: "“" + best.t + "”" }));
+    card.addEventListener("click", () => openDetail(store));
+    wrap.append(card);
+  }
 }
 
 /* ── view: store detail ─────────────────────────────────────────────── */
@@ -785,109 +1116,9 @@ function cellBlock(name: string, cell: Cell, merged?: MergedValue): HTMLElement 
 }
 
 function showStore(store: string, branch?: string): void {
-  switchView("store");
-  need<HTMLSelectElement>("#store-pick").value = store;
-  renderStore(branch);
-}
-
-function renderStore(wantBranch?: string): void {
-  const store = need<HTMLSelectElement>("#store-pick").value;
-  const pick = need<HTMLSelectElement>("#branch-pick");
-  const branches = data().branches[store] ?? {};
-  const chosen = wantBranch ?? pick.value;
-  clear(pick);
-  pick.append(el("option", { value: "", text: "all branches (chain level)" }));
-  for (const b of Object.keys(branches).sort()) {
-    pick.append(el("option", { value: b, text: b }));
-  }
-  pick.value = chosen && branches[chosen] ? chosen : "";
-
-  const body = need("#store-body");
-  clear(body);
-  const totals = data().totals[store];
-  const cats = pick.value ? branches[pick.value] ?? {} : data().stores[store] ?? {};
-
-  const head = el("div", { class: "card" });
-  head.append(el("h3", {}, [
-    el("span", { text: pick.value ? `${store} — ${pick.value}` : store }),
-    el("span", { class: "rank", text: totals ? fmt(totals.s) : "" }),
-  ]));
-  const nBranch = Object.keys(branches).length;
-  head.append(el("p", { class: "why",
-    text: `${(totals?.n ?? 0).toLocaleString()} claims across the chain, `
-        + `${nBranch} branch${nBranch === 1 ? "" : "es"} with their own evidence` }));
-  if (totals?.thin) {
-    head.append(el("p", { class: "badges" },
-      el("span", { class: "badge warn", text: "thin evidence — treat with caution" })));
-  }
-  const merged = pick.value
-    ? data().merged?.branches[store]?.[pick.value]
-    : data().merged?.stores[store];
-  if (merged) {
-    head.append(mergedBlock(merged, pick.value ? "combined, this branch" : "combined, chain"));
-  }
-
-  const rating = data().crosscheck?.stores[store];
-  if (rating && !rating.thin && totals) {
-    const cross = el("p", { class: "badges" });
-    cross.append(el("span", { class: "badge " + (cls(totals.s) === "pos" ? "good" : cls(totals.s) === "neg" ? "bad" : ""),
-      text: `Reddit ${fmt(totals.s)}` }));
-    cross.append(el("span", { class: "badge " + (cls(rating.norm) === "pos" ? "good" : cls(rating.norm) === "neg" ? "bad" : ""),
-      text: `Google ${rating.mean.toFixed(2)}★ (${fmt(rating.norm)})` }));
-    const gap = rating.norm - totals.s;
-    if (Math.abs(gap) >= 0.5) {
-      cross.append(el("span", { class: "badge warn", text: `sources disagree by ${fmt(gap)}` }));
-    }
-    head.append(cross);
-    head.append(el("p", { class: "why",
-      text: `${rating.n.toLocaleString()} Google ratings, ${rating.first} to ${rating.last}`
-          + ` — not merged into the verdict above` }));
-  }
-
-  const pins = data().places.filter((p) => p.store === store);
-  if (pins.length) {
-    const go = el("button", { class: "linkish", type: "button",
-      text: `show ${pins.length} location${pins.length === 1 ? "" : "s"} on the map →` });
-    go.addEventListener("click", () => {
-      need<HTMLSelectElement>("#map-store").value = store;
-      switchView("map");
-      renderMap();
-    });
-    head.append(go);
-  }
-  body.append(head);
-
-  const ordered = Object.entries(cats).sort((a, b) => b[1].w - a[1].w);
-  if (!ordered.length) {
-    body.append(el("p", { class: "empty", text: "No claims above the evidence threshold." }));
-  }
-  body.append(el("h2", { text: "By category" }));
-  const combined = pick.value
-    ? data().reviews?.branches[store]?.[pick.value]
-    : data().reviews?.categories[store];
-  if (combined) {
-    body.append(el("p", { class: "muted",
-      text: "Each row also shows the figure combining this corpus with "
-          + "Google review claims; hover for the split." }));
-  }
-  for (const [name, cell] of ordered) {
-    body.append(cellBlock(name, cell, combined?.[name]));
-  }
-
-  const items = data().items[store] ?? {};
-  const topItems = Object.entries(items).sort((a, b) => b[1].w - a[1].w).slice(0, 20);
-  if (topItems.length) {
-    body.append(el("h2", { text: "Specific items people mention" }));
-    for (const [name, cell] of topItems) body.append(cellBlock(name, cell));
-  }
-
-  const regions = data().regions[store] ?? {};
-  if (Object.keys(regions).length) {
-    body.append(el("h2", { text: "Mentioned by area, not by branch" }));
-    body.append(el("p", { class: "muted",
-      text: "These name a region rather than a store, so they are listed apart: "
-          + Object.keys(regions).sort().join(", ") }));
-  }
+  // The comp replaces the separate store page with a drawer, so the reader
+  // keeps their place in whatever list they clicked from.
+  openDetail(store, branch);
 }
 
 /* ── view: item search ──────────────────────────────────────────────── */
@@ -946,7 +1177,7 @@ function renderItems(): void {
 
 /* ── boot ───────────────────────────────────────────────────────────── */
 
-const VIEWS = ["list", "compare", "cross", "map", "store", "items", "method"] as const;
+const VIEWS = ["list", "compare", "cross", "map", "items", "method"] as const;
 type View = (typeof VIEWS)[number];
 
 function switchView(name: View): void {
@@ -963,8 +1194,7 @@ function switchView(name: View): void {
 }
 
 function renderView(name: View): void {
-  if (name === "compare") renderCompare();
-  if (name === "store") renderStore();
+  if (name === "compare") { renderCompare(); renderStoreCards(); }
   if (name === "items") renderItems();
   if (name === "cross") renderCross();
   if (name === "map" && !mapDrawn) renderMap();
@@ -995,23 +1225,25 @@ function fillMethod(): void {
   for (const [k, v] of pairs) dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
 }
 
-/** Headline figures. Real counts from the payload, never rounded up. */
+/** Headline figures on the Method page. Real counts, never rounded up. */
 function fillTally(): void {
   const d = data();
+  // `totals` is shopping-only, so this is the number that actually feeds a
+  // ranking — smaller than the number extracted, and the honest one to show.
   const claims = Object.values(d.totals).reduce((a, t) => a + t.n, 0);
   const items = Object.values(d.items).reduce((a, v) => a + Object.keys(v).length, 0);
   const pairs: [string, string][] = [
-    ["Stores ranked", String(Object.keys(d.stores).length)],
-    // `totals` is shopping-only, so this is the number that actually feeds
-    // a ranking — smaller than the number extracted, and the honest one to
-    // put on the front.
-    ["Claims weighed", claims.toLocaleString()],
+    ["Claims weighed into the rankings", claims.toLocaleString()],
+    ["Google ratings cross-checked", (d.crosscheck?.n_reviews ?? 0).toLocaleString()],
+    ["Stores scored", String(Object.keys(d.stores).length)],
     ["Locations mapped", String(d.places.length)],
-    ["Items you can look up", items.toLocaleString()],
+    ["Specific items you can look up", items.toLocaleString()],
   ];
-  const dl = need("#tally");
+  const grid = need("#m-stats");
   for (const [k, v] of pairs) {
-    dl.append(el("div", {}, [el("dt", { text: k }), el("dd", { text: v })]));
+    grid.append(el("div", {}, [
+      el("div", { class: "v", text: v }), el("div", { class: "k", text: k }),
+    ]));
   }
 }
 
@@ -1024,17 +1256,6 @@ function fillCalibrationProse(): void {
     `reddit = ${c.intercept.toFixed(2)} + ${c.slope.toFixed(2)} x google`;
   need("#m-loo").textContent = c.loo_rmse.toFixed(3);
   need("#m-resid").textContent = `±${c.residual_sd.toFixed(2)}`;
-  const cc = data().crosscheck;
-  if (cc) {
-    const deltas = Object.values(cc.stores)
-      .filter((r) => !r.thin)
-      .map((r) => c.intercept + c.slope * r.norm - r.norm);
-    if (deltas.length) {
-      need("#m-range").textContent =
-        `from ${fmt(Math.min(...deltas))} for the worst-rated to `
-        + `${fmt(Math.max(...deltas))} for the best`;
-    }
-  }
 }
 
 /** Check the fetched document really is the payload before trusting it.
@@ -1068,9 +1289,7 @@ async function boot(): Promise<void> {
   }
   need("#loading").hidden = true;
 
-  const stores = Object.keys(data().stores).sort();
-  for (const s of stores) {
-    need("#store-pick").append(el("option", { value: s, text: s }));
+  for (const s of Object.keys(data().stores).sort()) {
     need("#item-store").append(el("option", { value: s, text: s }));
   }
   const mapStores = Array.from(new Set(data().places.map((p) => p.store))).sort();
@@ -1080,10 +1299,7 @@ async function boot(): Promise<void> {
     need("#map-cat").append(el("option", { value: c, text: titleCase(c) }));
   }
 
-  const corpus = data().corpus;
-  need("#corpus-line").textContent =
-    `${(corpus?.documents_extracted ?? 0).toLocaleString()} Reddit posts and comments`;
-  fillTally();
+
   const footer = need("#footer-line");
   footer.textContent = `Generated ${data().generated_at} · opinion aggregated from Reddit, not verified prices · `;
   footer.append(el("a", { href: "https://github.com/pelednoam/find-groceries" }, "source"));
@@ -1097,7 +1313,10 @@ async function boot(): Promise<void> {
     need("#m-span").textContent = `${dates[0]} to ${dates[dates.length - 1]}`;
   }
   fillMethod();
+  fillTally();
   fillCalibrationProse();
+  renderBasket();
+  runList();
 
   const go = (v: View): void => { switchView(v); renderView(v); };
   for (const b of all<HTMLElement>("[data-view]")) {
@@ -1122,22 +1341,42 @@ async function boot(): Promise<void> {
       go(target.dataset["view"] as View);
     });
   }
-  need("#list-go").addEventListener("click", runList);
-  need("#list-demo").addEventListener("click", () => {
-    need<HTMLTextAreaElement>("#list-input").value = "milk\nchicken\nproduce\nbread\ncoffee\nbeer";
-    runList();
+  need("#add-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = need<HTMLInputElement>("#list-input");
+    addToBasket(input.value);
+    input.value = "";
+  });
+  const sorts: [typeof sortMode, string][] = [
+    ["value", "Best on your list"], ["quality", "Best rated"], ["evidence", "Most evidence"],
+  ];
+  const bar = need("#sorts");
+  for (const [id, label] of sorts) {
+    const b = el("button", { type: "button", class: id === sortMode ? "on" : "", text: label });
+    b.addEventListener("click", () => {
+      sortMode = id;
+      for (const other of Array.from(bar.children)) other.classList.remove("on");
+      b.classList.add("on");
+      runList();
+    });
+    bar.append(b);
+  }
+  document.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape" && drawerOpen.length) closeDrawer();
   });
   need("#pref").addEventListener("input", (e) => {
-    const v = Number((e.target as HTMLInputElement).value);
-    need("#pref-out").textContent = prefLabel(v);
-    if (need("#list-result").children.length) runList();
+    need("#pref-out").textContent = prefLabel(Number((e.target as HTMLInputElement).value));
+    runList();
   });
-  need("#cmp-cat").addEventListener("change", renderCompare);
-  need("#cmp-thin").addEventListener("change", renderCompare);
+  need("#pref-out").textContent = prefLabel(50);
+  // These controls serve both the basket ranking and the compare table.
+  const refilter = (): void => { renderCompare(); runList(); };
+  need("#cmp-cat").addEventListener("change", refilter);
+  need("#cmp-thin").addEventListener("change", refilter);
   need("#cmp-min").addEventListener("input", (e) => {
     const v = (e.target as HTMLInputElement).value;
     need("#cmp-min-out").textContent = v === "0" ? "any" : v + "+";
-    renderCompare();
+    refilter();
   });
   for (const th of all<HTMLElement>("#cmp-table th")) {
     th.addEventListener("click", () => {
@@ -1152,11 +1391,6 @@ async function boot(): Promise<void> {
   need("#map-store").addEventListener("change", renderMap);
   need("#map-cat").addEventListener("change", renderMap);
   need("#map-evidence").addEventListener("change", renderMap);
-  need("#store-pick").addEventListener("change", () => {
-    need<HTMLSelectElement>("#branch-pick").value = "";
-    renderStore();
-  });
-  need("#branch-pick").addEventListener("change", () => renderStore());
   let t: ReturnType<typeof setTimeout> | null = null;
   need("#item-q").addEventListener("input", () => {
     if (t) clearTimeout(t);

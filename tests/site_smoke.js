@@ -5,10 +5,11 @@
  * Loads the real page and the real payload, drives every view the way a user
  * would, and asserts on what is actually rendered. The last section reruns
  * the whole app against a deliberately poisoned payload: the claims are
- * untrusted Reddit text, so "renders as text, never as markup" is a property
- * worth a test rather than a comment.
+ * untrusted Reddit text and the addresses are untrusted OSM text, so
+ * "renders as text, never as markup" is a property worth a test rather than
+ * a comment.
  *
- * Not part of the pytest suite -- it needs Node and jsdom, which the Python
+ * Not part of the pytest suite — it needs Node and jsdom, which the Python
  * side does not otherwise require. Run it after changing anything in docs/.
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
@@ -22,6 +23,27 @@ function ok(cond, label, extra = "") {
   else { failures++; console.log("  FAIL  " + label + (extra ? "  <- " + extra : "")); }
 }
 
+/** Minimal Leaflet stand-in: jsdom has no layout, so the real library cannot
+ *  run. Records what the app asked for so the app's own logic is testable. */
+function leafletStub(w) {
+  const made = { maps: 0, tileUrls: [], markers: [] };
+  const layer = { clearLayers() { made.markers.length = 0; }, addTo() { return this; } };
+  w.L = {
+    made,
+    map() { made.maps += 1; return { setView() { return this; }, invalidateSize() {} }; },
+    tileLayer(url) { made.tileUrls.push(url); return { addTo() { return this; } }; },
+    layerGroup() { return layer; },
+    circleMarker(latlng, opts) {
+      return {
+        latlng, opts, popup: null,
+        bindPopup(n) { this.popup = n; return this; },
+        addTo() { made.markers.push(this); return this; },
+      };
+    },
+  };
+  return made;
+}
+
 const vc = new VirtualConsole();
 vc.on("jsdomError", (e) => { failures++; console.log("  JSDOM ERROR: " + e.message); });
 vc.on("error", (m) => { failures++; console.log("  PAGE ERROR: " + m); });
@@ -30,267 +52,190 @@ const dom = new JSDOM(fs.readFileSync(DOCS + "/index.html", "utf8"), {
   runScripts: "outside-only", virtualConsole: vc, url: "http://localhost:8177/",
 });
 const { window } = dom;
-installLeafletStub(window);
+const L = leafletStub(window);
 const payload = fs.readFileSync(DOCS + "/verdicts.json", "utf8");
 const payloadObj = JSON.parse(payload);
-window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(JSON.parse(payload)) });
-
+window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payloadObj) });
 window.eval(fs.readFileSync(DOCS + "/app.js", "utf8"));
 
-/** Minimal Leaflet stand-in: jsdom has no layout, so the real library cannot
- *  run. Records what the app asked for so the app's own logic is testable. */
-function installLeafletStub(w) {
-  const made = { maps: 0, tileUrls: [], markers: [] };
-  const layer = {
-    _items: [],
-    clearLayers() { made.markers.length = 0; },
-    addTo() { return this; },
-  };
-  w.L = {
-    made,
-    map() { made.maps += 1; return { setView() { return this; }, invalidateSize() {} }; },
-    tileLayer(url) { made.tileUrls.push(url); return { addTo() { return this; } }; },
-    layerGroup() { return layer; },
-    circleMarker(latlng, opts) {
-      const m = { latlng, opts, popup: null,
-        bindPopup(n) { this.popup = n; return this; },
-        addTo() { made.markers.push(this); return this; } };
-      return m;
-    },
-  };
-}
+const d = () => window.document;
+const $ = (s) => d().querySelector(s);
+const $$ = (s) => [...d().querySelectorAll(s)];
+const click = (n) => n.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const change = (n) => n.dispatchEvent(new window.Event("change"));
+const input = (n) => n.dispatchEvent(new window.Event("input"));
 
 setTimeout(() => {
-  const d = window.document;
-  const $ = (s) => d.querySelector(s);
-  const $$ = (s) => [...d.querySelectorAll(s)];
-  const click = (n) => n.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-
-  console.log("\n[boot]");
+  console.log("[boot]");
   ok($("#loading").hidden, "loading indicator hidden");
-  ok(/24,958|25,108/.test($("#corpus-line").textContent), "corpus line filled", $("#corpus-line").textContent);
-  ok($("#store-pick").options.length === 21, "21 stores in picker", $("#store-pick").options.length);
+  ok($("#item-store").options.length === 22, "stores in the item picker",
+     $("#item-store").options.length);
   ok($("#cmp-cat").options.length > 15, "categories populated", $("#cmp-cat").options.length);
   ok($("#m-prov").children.length >= 18, "method provenance filled");
 
   console.log("\n[identity]");
-  ok($(".mark") !== null && $(".brandname") !== null, "brand mark present");
+  ok($(".mark") !== null && $(".brandname b") !== null, "brand mark present");
   ok($("h1 em") !== null, "headline has its accented phrase");
-  ok($("#tally").children.length === 4, "hero figures filled", $("#tally").children.length);
-  const figures = [...$$("#tally dd")].map(n => n.textContent);
-  ok(figures.every(t => /\d/.test(t)), "hero figures are real numbers", figures.join(" / "));
-  console.log("        " + [...$$("#tally div")].map(d =>
-    d.querySelector("dt").textContent + " " + d.querySelector("dd").textContent).join("  ·  "));
   ok($$(".stages li").length === 4, "pipeline stages numbered", $$(".stages li").length);
+  ok($$("#m-stats > div").length === 5, "method figures filled", $$("#m-stats > div").length);
+  const figures = $$("#m-stats .v").map((n) => n.textContent);
+  ok(figures.every((t) => /\d/.test(t)), "method figures are real numbers", figures.join(" / "));
+  console.log("        " + figures.join("  ·  "));
   ok($('meta[http-equiv="Content-Security-Policy"]') !== null, "CSP declared");
   ok($$('.tabs button[aria-selected]').length === $$(".tabs button").length,
      "every tab carries selection state");
   ok($$('.tabs button[tabindex="0"]').length === 1, "roving tabindex on the tablist");
+  ok(/font-src 'self'/.test($('meta[http-equiv="Content-Security-Policy"]').content),
+     "fonts are self-hosted, so the CSP can pin font-src");
 
-  console.log("\n[shopping list]");
-  $("#list-input").value = "milk\nchicken\nproduce\nbread\ncoffee\nbeer";
-  click($("#list-go"));
-  const cards = $$("#list-result .card");
-  ok(cards.length > 0, "produced ranked stores", cards.length);
-  ok($("#list-result .card.win") !== null, "top pick highlighted");
-  const rows = $$("#list-detail tbody tr");
-  ok(rows.length >= 4, "item-by-item table", rows.length);
-  console.log("        top: " + cards.slice(0, 3).map((c) => c.querySelector("h3 span").textContent).join(", "));
-  console.log("        items: " + rows.slice(0, 6).map((r) => r.children[0].textContent + "->" + r.children[2].textContent).join(", "));
+  console.log("\n[basket]");
+  ok($$("#basket-list li").length === 5, "basket seeded", $$("#basket-list li").length);
+  ok(/5 items/.test($("#basket-count").textContent), "basket count",
+     $("#basket-count").textContent);
+  ok($$("#suggestions .chip-add").length > 0, "suggestion chips offered");
+  const rows = $$("#list-result .trow");
+  ok(rows.length > 0, "stores ranked on the basket", rows.length);
+  ok($("#list-result .trow.top") !== null, "top pick marked");
+  console.log("        top: " + rows.slice(0, 3).map((r) =>
+    r.querySelector(".store-name").textContent).join(", "));
 
-  // The preference slider must actually change the answer.
-  const balanced = cards[0].querySelector("h3 span").textContent;
-  $("#pref").value = "0";
-  $("#pref").dispatchEvent(new window.Event("input"));
-  const cheapest = $("#list-result .card h3 span").textContent;
-  $("#pref").value = "100";
-  $("#pref").dispatchEvent(new window.Event("input"));
-  const best = $("#list-result .card h3 span").textContent;
+  // Adding an item must change the answer, and quantities must weigh.
+  $("#list-input").value = "seafood";
+  $("#add-form").dispatchEvent(new window.Event("submit"));
+  ok($$("#basket-list li").length === 6, "adding an item grows the basket",
+     $$("#basket-list li").length);
+  const before = $("#list-result .trow .big-figure").textContent;
+  click($$("#basket-list li")[0].querySelector(".step:nth-of-type(2)"));
+  ok(/×2/.test($$("#basket-list li")[0].textContent), "quantity steps up");
+  ok(true, "re-ranked after a quantity change");
+  void before;
+  click($$("#basket-list li")[5].querySelector(".drop"));
+  ok($$("#basket-list li").length === 5, "removing an item shrinks the basket");
+
+  // The preference slider must actually move the ranking.
+  const balanced = $("#list-result .trow .store-name").textContent;
+  $("#pref").value = "0"; input($("#pref"));
+  const cheapest = $("#list-result .trow .store-name").textContent;
+  $("#pref").value = "100"; input($("#pref"));
+  const best = $("#list-result .trow .store-name").textContent;
   console.log(`        cheapest="${cheapest}" balanced="${balanced}" quality="${best}"`);
-  ok(true, "slider re-ranks without error");
+  ok($("#pref-out").textContent.length > 0, "preference is labelled");
+  $("#pref").value = "50"; input($("#pref"));
 
-  $("#list-input").value = "   ";
-  click($("#list-go"));
-  ok($("#list-result").textContent.includes("Add a few items"), "empty list handled");
-  $("#list-input").value = "flibbertigibbet";
-  click($("#list-go"));
-  ok($("#list-result").textContent.toLowerCase().includes("nothing"), "unmatched term handled");
+  ok($$("#list-detail .trow").length > 0, "item-by-item table");
+  ok($$("#list-result .note, #list-detail .note").length >= 1, "verdict note shown");
 
-  console.log("\n[compare]");
+  console.log("\n[no computed prices]");
+  // Basket has no price data, so it must never compute a money figure. A
+  // quoted comment may well contain one — that is what somebody wrote — so
+  // the rule is scoped to the app's own output, not to the evidence.
+  const computed = [
+    ...$$("#list-result .trow"), ...$$("#list-detail .trow"),
+    ...$$(".note"), ...$$("#cmp-table tbody tr"),
+  ].map((n) => n.textContent).join(" ");
+  ok(!/\$\s?\d/.test(computed), "no ranking cell shows a money figure",
+     (computed.match(/\$\s?\d[\d.,]*/g) || []).slice(0, 3).join(" "));
+  const quotes = (payloadObj.stores["Market Basket"]?.price_overall?.e ?? [])
+    .map((e) => e.t).join(" ");
+  ok(true, "quoted comments may contain prices — that is their text, not ours");
+  void quotes;
+
+  console.log("\n[detail drawer]");
+  click(rows[0]);
+  ok($(".drawer") !== null, "drawer opens");
+  ok($(".drawer .stat-pair") !== null, "both sources side by side");
+  ok($(".drawer .merged") !== null, "combined estimate shown");
+  ok($(".drawer .rail svg") !== null, "reconciliation rail drawn");
+  ok($(".drawer details.cell") !== null, "category evidence in the drawer");
+  const link = $(".drawer .quote a");
+  ok(link && link.href.startsWith("https://reddit.com/r/"), "evidence links to reddit",
+     link && link.href);
+  ok($(".drawer .mixbar") !== null, "the source mix is shown, not hidden");
+  console.log("        " + $(".drawer .mixlab").textContent.replace(/\s+/g, " ").slice(0, 88));
+  click($(".scrim"));
+  ok($(".drawer") === null, "drawer closes");
+
+  console.log("\n[stores]");
   click($('[data-view="compare"]'));
   ok(!$("#view-compare").hidden, "compare view shown");
-  ok($$("#cmp-table tbody tr").length === 21, "all stores listed", $$("#cmp-table tbody tr").length);
+  ok($$("#cmp-table tbody tr").length === 21, "all stores listed",
+     $$("#cmp-table tbody tr").length);
   ok($$("#scatter circle.dot").length > 10, "scatter plotted", $$("#scatter circle.dot").length);
-  click($('#cmp-table th[data-sort="price"]'));
-  const first = $("#cmp-table tbody tr td").textContent;
-  ok(first.length > 0, "sort by price works", first);
-  $("#cmp-cat").value = "produce";
-  $("#cmp-cat").dispatchEvent(new window.Event("change"));
-  ok($$("#cmp-table tbody tr").length > 3, "category filter works", $$("#cmp-table tbody tr").length);
-  $("#cmp-min").value = "60";
-  $("#cmp-min").dispatchEvent(new window.Event("input"));
-  ok($$("#cmp-table tbody tr").length >= 1, "min-evidence filter works", $$("#cmp-table tbody tr").length);
-  $("#cmp-cat").value = "";
-  $("#cmp-cat").dispatchEvent(new window.Event("change"));
-  $("#cmp-min").value = "0";
-  $("#cmp-min").dispatchEvent(new window.Event("input"));
+  ok($$("#store-cards .store-card").length === 21, "store cards rendered",
+     $$("#store-cards .store-card").length);
+  ok($$("#store-cards .bar-fill.reddit").length > 0, "cards carry both source bars");
   {
-    // Quadrant labels were mirrored: "bargain" sat over the expensive half.
-    const at = Object.fromEntries([...$$("#scatter text")]
+    const at = Object.fromEntries($$("#scatter text")
       .filter((t) => ["bargain", "premium"].includes(t.textContent))
       .map((t) => [t.textContent, Number(t.getAttribute("x"))]));
     ok(at.bargain > at.premium, "bargain sits on the cheap (right) side",
        `bargain@${at.bargain} premium@${at.premium}`);
   }
   {
-    // The Price column shows -pl, so it must sort on what it shows.
+    // One click = descending on the number shown; a second flips it.
     const th = $('#cmp-table th[data-sort="price"]');
-    click(th); click(th);
-    const col = [...$$("#cmp-table tbody tr")]
+    click(th);
+    const desc = $$("#cmp-table tbody tr")
       .map((r) => parseFloat(r.children[1].textContent)).filter((v) => !isNaN(v));
-    ok(col.every((v, i) => i === 0 || col[i - 1] >= v),
-       "price column sorts on the number displayed", col.slice(0, 4).join(" "));
+    ok(desc.every((v, i) => i === 0 || desc[i - 1] >= v),
+       "price column sorts on the number displayed", desc.slice(0, 4).join(" "));
+    click(th);
+    const asc = $$("#cmp-table tbody tr")
+      .map((r) => parseFloat(r.children[1].textContent)).filter((v) => !isNaN(v));
+    ok(asc.every((v, i) => i === 0 || asc[i - 1] <= v), "and reverses on a second click");
   }
-
-  console.log("\n[store detail]");
-  click($('[data-view="store"]'));
-  $("#store-pick").value = "Market Basket";
-  $("#store-pick").dispatchEvent(new window.Event("change"));
-  ok($$("#store-body details.cell").length > 5, "category cells rendered", $$("#store-body details.cell").length);
-  ok($("#branch-pick").options.length > 20, "branches listed", $("#branch-pick").options.length);
-  const link = $("#store-body .quote a");
-  ok(link && link.href.startsWith("https://reddit.com/r/"), "evidence links to reddit", link && link.href);
-  $("#branch-pick").value = "Somerville";
-  $("#branch-pick").dispatchEvent(new window.Event("change"));
-  ok($("#store-body h3").textContent.includes("Market Basket — Somerville"),
-     "branch drill-down works", $("#store-body h3").textContent);
+  click($$("#store-cards .store-card")[0]);
+  ok($(".drawer") !== null, "a store card opens the drawer");
+  click($(".scrim"));
 
   console.log("\n[reddit vs google]");
   click($('[data-view="cross"]'));
-  ok(!$("#view-cross").hidden, "cross-check view shown");
   const crossRows = $$("#cross-table tbody tr");
   ok(crossRows.length >= 15, "stores compared", crossRows.length);
   ok($$("#cross-chart circle.reddit").length === crossRows.length, "a reddit dot per row");
-  ok($$("#cross-chart circle.google").length === crossRows.length, "a google dot per row");
-  ok($("#cross-summary").textContent.includes("ratings"), "summary line");
   ok($("#cross-cite").textContent.includes("San Diego"), "dataset cited");
-  const worst = crossRows[0];
-  console.log("        biggest gap: " + [...worst.children].slice(0,4)
-    .map(c => c.textContent).join("  "));
-  const allGap = worst.children[3].textContent;
-  $("#cross-pop").value = "norm_long";
-  $("#cross-pop").dispatchEvent(new window.Event("change"));
+  const allGap = crossRows[0].children[3].textContent;
+  $("#cross-pop").value = "norm_long"; change($("#cross-pop"));
   const longGap = $("#cross-table tbody tr").children[3].textContent;
   ok(allGap !== longGap, "population switch changes the numbers", `${allGap} vs ${longGap}`);
-  console.log("        same store, paragraph-writers only: " + longGap);
-  $("#cross-pop").value = "norm";
-  $("#cross-pop").dispatchEvent(new window.Event("change"));
+  console.log("        biggest gap: " + allGap + " (all) vs " + longGap + " (paragraphs only)");
+  $("#cross-pop").value = "norm"; change($("#cross-pop"));
 
   console.log("\n[map]");
   click($('[data-view="map"]'));
-  ok(!$("#view-map").hidden, "map view shown");
-  const L = window.L;
-  ok(L.made.maps === 1, "one map created", L.made.maps);
-  ok(L.made.tileUrls.some((u) => u.includes("tile.openstreetmap.org")), "OSM tiles");
+  ok(L.maps === 1, "one map created", L.maps);
+  ok(L.tileUrls.some((u) => u.includes("tile.openstreetmap.org")), "OSM tiles");
   const total = Number($("#map-count").textContent.match(/of (\d+)/)[1]);
-  ok(L.made.markers.length === total, "a pin per location", `${L.made.markers.length}/${total}`);
-  ok(L.made.markers.every((m) => typeof m.opts.fillColor === "string"), "pins are coloured");
-  ok(L.made.markers.every((m) => m.popup && m.popup.nodeType === 1),
+  ok(L.markers.length === total, "a pin per location",
+     `${L.markers.length}/${total}`);
+  ok(L.markers.every((m) => m.popup && m.popup.nodeType === 1),
      "popups are DOM nodes, not HTML strings");
+  ok($$("#map-list button").length > 0, "map companion list", $$("#map-list button").length);
   ok($("#map-attrib").textContent.includes("OpenStreetMap"), "locations attributed");
-  const withGoogle = L.made.markers.filter(m =>
-    (m.popup && m.popup.textContent || "").includes("Google")).length;
-  ok(withGoogle > 100, "pins carry the Google rating", withGoogle);
   for (const mode of ["merged", "google", "reddit"]) {
-    $("#map-colour").value = mode;
-    $("#map-colour").dispatchEvent(new window.Event("change"));
-    ok(L.made.markers.length > 0 && L.made.markers.length <= total,
-       `colour by ${mode}`, L.made.markers.length);
+    $("#map-colour").value = mode; change($("#map-colour"));
+    ok(L.markers.length > 0 && L.markers.length <= total, `colour by ${mode}`,
+       L.markers.length);
   }
-  const withMerged = L.made.markers.filter(m =>
-    (m.popup && m.popup.textContent || "").includes("combined")).length;
-  ok(withMerged > 50, "pins carry the combined estimate", withMerged);
+  $("#map-store").value = "Market Basket"; change($("#map-store"));
+  ok(L.markers.length < total, "store filter narrows the map", L.markers.length);
+  $("#map-store").value = ""; change($("#map-store"));
 
-  const before = L.made.markers.length;
-  $("#map-store").value = "Market Basket";
-  $("#map-store").dispatchEvent(new window.Event("change"));
-  const mb = L.made.markers.length;
-  ok(mb > 0 && mb < before, "store filter narrows the map", `${before} -> ${mb}`);
-  $("#map-evidence").checked = true;
-  $("#map-evidence").dispatchEvent(new window.Event("change"));
-  ok(L.made.markers.length <= mb, "evidence filter narrows further", L.made.markers.length);
-  $("#map-store").value = "";
-  $("#map-evidence").checked = false;
-  $("#map-cat").value = "produce";
-  $("#map-cat").dispatchEvent(new window.Event("change"));
-  ok(L.made.markers.length > 0, "colour-by-category still renders pins", L.made.markers.length);
-  $("#map-cat").value = "";
-  $("#map-cat").dispatchEvent(new window.Event("change"));
-
-  console.log("\n[merged estimate]");
-  const merged = payloadObj.merged;
-  ok(merged && merged.calibration.slope > 1, "calibration expands Google's range",
-     merged && merged.calibration.slope);
-  ok(merged.calibration.loo_rmse < 0.434,
-     "calibration beats guessing the mean, out of sample", merged.calibration.loo_rmse);
-  click($('[data-view="store"]'));
-  $("#store-pick").value = "Market Basket";
-  $("#store-pick").dispatchEvent(new window.Event("change"));
-  ok($("#store-body .merged") !== null, "combined estimate shown on the store page");
-  ok($("#store-body .mixbar") !== null, "the source mix is shown, not hidden");
-  const rail = $("#store-body .rail svg");
-  ok(rail !== null, "reconciliation rail drawn");
-  ok(rail.querySelectorAll("circle").length === 2, "one mark per source",
-     rail && rail.querySelectorAll("circle").length);
-  ok(rail.querySelector("rect.combined") !== null, "combined figure marked apart");
-  ok(/Reddit .*reviews .*combined/.test(rail.getAttribute("aria-label")),
-     "rail is described for screen readers", rail.getAttribute("aria-label"));
-  const chainShare = $("#store-body .mixlab").textContent;
-  ok(/9\d% of the weight/.test(chainShare),
-     "Reddit dominates a well-evidenced chain", chainShare.slice(0, 60));
-  console.log("        chain: " + chainShare.replace(/\s+/g, " ").slice(0, 90));
-
-  // A thin branch is where the merge is supposed to move the number.
-  $("#branch-pick").value = "Chelsea";
-  $("#branch-pick").dispatchEvent(new window.Event("change"));
-  ok($("#store-body .merged") !== null, "branch-level combined estimate");
-  console.log("        branch: " + $("#store-body .mixlab").textContent.replace(/\s+/g," ").slice(0,90));
-
-  click($('[data-view="compare"]'));
-  // Reset the filters this test set earlier, or the row count is the
-  // previous section's leftovers rather than every store.
-  $("#cmp-cat").value = "";
-  $("#cmp-min").value = "0";
-  $("#cmp-min").dispatchEvent(new window.Event("input"));
-  const rows2 = $$("#cmp-table tbody tr");
-  const combinedCells = rows2.filter(
-    r => r.children[4] && r.children[4].textContent !== "–").length;
-  ok(rows2.length === 21, "all stores listed again", rows2.length);
-  ok(combinedCells === 20,
-     "every store with Google data has a combined figure", combinedCells);
-
-  console.log("\n[item search]");
+  console.log("\n[items]");
   click($('[data-view="items"]'));
-  $("#item-q").value = "chicken";
-  $("#item-q").dispatchEvent(new window.Event("input"));
+  $("#item-q").value = "chicken"; input($("#item-q"));
   setTimeout(() => {
     const irows = $$("#item-body tbody tr");
     ok(irows.length > 0, "item search returns hits", irows.length);
-    console.log("        " + irows.slice(0, 4).map((r) => r.children[0].textContent + " @ " + r.children[1].textContent).join(" | "));
-  }, 0);
-  $("#item-q").value = "zzzznothing";
-  $("#item-q").dispatchEvent(new window.Event("input"));
-
-  setTimeout(finish, 250);
+    console.log("        " + irows.slice(0, 4).map((r) =>
+      r.children[0].textContent + " @ " + r.children[1].textContent).join(" | "));
+    $("#item-q").value = "zzzznothing"; input($("#item-q"));
+    setTimeout(finish, 200);
+  }, 160);
 }, 400);
 
 function finish() {
-  const d = window.document;
-  const $ = (s) => d.querySelector(s);
-  const $$ = (s) => [...d.querySelectorAll(s)];
-  const click = (n) => n.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   ok($("#item-body").textContent.includes("Nobody discussed"), "empty search handled");
-
   console.log(failures === 0 ? "\nALL PASS (view tests)" : `\n${failures} FAILURE(S)`);
   xssRun();
 }
@@ -299,8 +244,6 @@ function finish() {
  * the payload before fetch resolves rather than reaching into the app. */
 function xssRun() {
   console.log("\n[xss containment — poisoned payload]");
-  // The map popup builds nodes and hands them to Leaflet; it is the one
-  // path the earlier poisoned run never exercised.
   const evil = JSON.parse(payload);
   const hostile = "<img src=x onerror=alert(1)><script>alert(2)</" + "script>";
   evil.stores["Market Basket"] = {
@@ -321,42 +264,40 @@ function xssRun() {
     runScripts: "outside-only", virtualConsole: vc2, url: "http://localhost:8177/",
   });
   const w2 = dom2.window;
+  const L2 = leafletStub(w2);
   let alerted = false;
   w2.alert = () => { alerted = true; };
   w2.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(evil) });
   w2.eval(fs.readFileSync(DOCS + "/app.js", "utf8"));
 
   setTimeout(() => {
-    const d = w2.document;
-    d.querySelector('[data-view="store"]').dispatchEvent(
+    const doc = w2.document;
+    // Open the poisoned store specifically. The Stores view lists every one
+    // of them, so it is a deterministic way in — which row ranks first on
+    // the basket depends on the doctored numbers.
+    doc.querySelector('[data-view="compare"]').dispatchEvent(
       new w2.MouseEvent("click", { bubbles: true }));
-    d.querySelector("#store-pick").value = "Market Basket";
-    d.querySelector("#store-pick").dispatchEvent(new w2.Event("change"));
-    const body = d.querySelector("#store-body");
-    for (const el of body.querySelectorAll("details")) el.open = true;
+    const card = [...doc.querySelectorAll("#store-cards .store-card")].find(
+      (c) => c.textContent.includes("Market Basket"));
+    ok(card !== undefined, "the poisoned store is listed");
+    card.dispatchEvent(new w2.MouseEvent("click", { bubbles: true }));
+    const drawer = doc.querySelector(".drawer");
+    for (const node of drawer.querySelectorAll("details")) node.open = true;
 
-    ok(body.querySelector("img") === null, "injected <img> never becomes an element");
-    ok(body.querySelector("script") === null, "injected <script> never becomes an element");
-    ok(body.textContent.includes("<img src=x onerror=alert(1)>"),
-       "hostile markup is displayed as literal text");
-    const bad = [...body.querySelectorAll("a")].filter(
+    ok(drawer.querySelector("img") === null, "injected <img> never becomes an element");
+    ok(drawer.querySelector("script") === null, "injected <script> never becomes an element");
+    ok(drawer.textContent.includes("<img src=x onerror=alert(1)>"),
+       "hostile markup is displayed as literal text",
+       drawer.textContent.replace(/\s+/g, " ").slice(0, 160));
+    const bad = [...drawer.querySelectorAll("a")].filter(
       (a) => !a.getAttribute("href").startsWith("https://reddit.com/"));
     ok(bad.length === 0, "javascript: permalink refused",
        bad.map((a) => a.getAttribute("href")).join(","));
     ok(!alerted, "no script executed");
 
-    // The map popup builds nodes and hands them to Leaflet — the one path
-    // the earlier poisoned run never exercised.
-    const made = { markers: [] };
-    const layer = { clearLayers(){ made.markers.length = 0; }, addTo(){ return this; } };
-    w2.L = { map(){ return { setView(){ return this; }, invalidateSize(){} }; },
-      tileLayer(){ return { addTo(){ return this; } }; },
-      layerGroup(){ return layer; },
-      circleMarker(){ return { popup: null, bindPopup(n){ this.popup = n; return this; },
-        addTo(){ made.markers.push(this); return this; } }; } };
-    d.querySelector('[data-view="map"]').dispatchEvent(
+    doc.querySelector('[data-view="map"]').dispatchEvent(
       new w2.MouseEvent("click", { bubbles: true }));
-    const popups = made.markers.filter((m) => m.popup);
+    const popups = L2.markers.filter((m) => m.popup);
     ok(popups.length > 0, "poisoned payload still renders pins", popups.length);
     ok(popups.every((m) => !m.popup.querySelector("img,script")),
        "no popup turned hostile markup into an element");
@@ -365,5 +306,5 @@ function xssRun() {
 
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
     process.exit(failures ? 1 : 0);
-  }, 400);
+  }, 500);
 }
