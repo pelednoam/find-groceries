@@ -37,6 +37,25 @@ function el(tag, props = {}, kids = []) {
     }
     return n;
 }
+/** Make a non-button element behave like one for keyboard users.
+ *
+ * Cards, table rows and scatter dots all navigate on click. Without this they
+ * are invisible to anyone not using a mouse — which is most of the ways this
+ * page gets read.
+ */
+function activatable(node, label, run) {
+    node.setAttribute("tabindex", "0");
+    node.setAttribute("role", "button");
+    node.setAttribute("aria-label", label);
+    node.addEventListener("click", run);
+    node.addEventListener("keydown", (e) => {
+        const k = e.key;
+        if (k === "Enter" || k === " ") {
+            e.preventDefault();
+            run();
+        }
+    });
+}
 function need(sel) {
     const n = document.querySelector(sel);
     if (!n)
@@ -59,10 +78,16 @@ const titleCase = (s) => s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperC
 /* Enough evidence for a cell to be worth acting on. Below this the shrinkage
  * applied in stage 3 dominates and every number drifts toward zero. */
 const MIN_W = 1.0;
-/** Combine quality and price into one number. pref: 0 = cheapest, 1 = best. */
+/** Combine quality and price into one number. pref: 0 = cheapest, 1 = best.
+ *
+ * A cell with no price evidence used to return its full sentiment, so at
+ * "cheapest" it competed at full strength against cells actually being
+ * judged on price. It now contributes only the share the reader asked for,
+ * which is the honest answer: we know nothing about its cost.
+ */
 function value(cell, pref) {
     if (cell.pl === undefined)
-        return cell.s; // nothing said about cost
+        return pref * cell.s;
     return pref * cell.s + (1 - pref) * -cell.pl; // pl is negative for cheap
 }
 /** Split a shopping list into terms. Blank lines and stray commas ignored. */
@@ -82,7 +107,14 @@ function resolve(term) {
         for (const [name, cell] of Object.entries(items)) {
             if (name === term || name.includes(term) || term.includes(name)) {
                 const prev = perStore[store];
-                if (!prev || cell.w > prev.cell.w)
+                // Specificity first, evidence second. An exact match beats a
+                // substring however much weight the substring carries, so asking
+                // for "key limes" is not answered by "limes".
+                const rank = (n) => (n === term ? 2 : n.includes(term) ? 1 : 0);
+                const better = !prev
+                    || rank(name) > rank(prev.label)
+                    || (rank(name) === rank(prev.label) && cell.w > prev.cell.w);
+                if (better)
                     perStore[store] = { cell, label: name };
             }
         }
@@ -191,7 +223,7 @@ function runList() {
         }
         if (badges.children.length)
             card.append(badges);
-        card.addEventListener("click", () => showStore(t.store));
+        activatable(card, `${t.store}, combined score ${fmt(t.avg)}`, () => showStore(t.store));
         out.append(card);
     });
     if (unmatched.length) {
@@ -223,7 +255,7 @@ function runList() {
             el("td", { class: "num" }, el("span", { class: "score " + cls(best.v), text: fmt(best.v) })),
             el("td", { class: "num muted", text: String(best.hit.cell.n) }),
         ]);
-        tr.addEventListener("click", () => showStore(best.store));
+        activatable(tr, `${r.term}: best at ${best.store}`, () => showStore(best.store));
         body.append(tr);
     }
     table.append(body);
@@ -250,11 +282,23 @@ function compareRows() {
         rows.push({ store, price, quality, sentiment: cell ? cell.s : totals.s, n, w });
     }
     const k = cmpSort.key;
+    // The Price column shows -pl ("higher is cheaper"), so it must sort on the
+    // number displayed. Sorting the raw level put the most expensive store at
+    // the top of a column headed by a positive figure.
+    const value = (r) => k === "price" ? (r.price === undefined ? undefined : -r.price)
+        : k === "quality" ? r.quality
+            : k === "sentiment" ? r.sentiment
+                : k === "n" ? r.n
+                    : k === "w" ? r.w
+                        : undefined;
     rows.sort((a, b) => {
         if (k === "store")
             return cmpSort.dir * a.store.localeCompare(b.store);
-        const av = a[k];
-        const bv = b[k];
+        const av = value(a), bv = value(b);
+        // Missing values sort last in either direction, and two missing values
+        // compare equal — otherwise the comparator is not a valid ordering.
+        if (av === undefined && bv === undefined)
+            return a.store.localeCompare(b.store);
         if (av === undefined)
             return 1;
         if (bv === undefined)
@@ -290,7 +334,7 @@ function renderCompare() {
             el("td", { class: "num muted", text: r.n.toLocaleString() }),
             el("td", { class: "num muted", text: r.w.toLocaleString() }),
         ]);
-        tr.addEventListener("click", () => showStore(r.store));
+        activatable(tr, `${r.store} details`, () => showStore(r.store));
         body.append(tr);
     }
     renderScatter(rows);
@@ -324,16 +368,19 @@ function renderScatter(rows) {
     label("← pricier", m.l, H - m.b + 30, "axis-label", "start");
     label("better quality ↑", 12, m.t + 4, "axis-label", "start");
     label("worse quality ↓", 12, H - m.b - 4, "axis-label", "start");
-    label("bargain", x(0.55), y(0.85), "quad");
-    label("premium", x(-0.55), y(0.85), "quad");
-    label("avoid", x(-0.55), y(-0.85), "quad");
+    // x() puts CHEAP on the right (price_level is negative for cheap), so a
+    // bargain label belongs at a negative price level. These were mirrored:
+    // "bargain" sat over the expensive half and "premium" over the cheap one.
+    label("bargain", x(-0.55), y(0.85), "quad");
+    label("premium", x(0.55), y(0.85), "quad");
+    label("avoid", x(0.55), y(-0.85), "quad");
     for (const p of pts) {
         const r = Math.max(4, Math.min(16, Math.sqrt(p.w) / 1.6));
         const dot = svgEl("circle", { class: "dot", cx: x(p.price), cy: y(p.quality), r });
         const t = svgEl("title", {});
         t.textContent = `${p.store} — ${p.n.toLocaleString()} claims`;
         dot.append(t);
-        dot.addEventListener("click", () => showStore(p.store));
+        activatable(dot, `${p.store}, ${p.n} claims`, () => showStore(p.store));
         svg.append(dot);
         const name = svgEl("text", { class: "dot-label", x: x(p.price),
             y: y(p.quality) - r - 4, "text-anchor": "middle" });
@@ -385,11 +432,13 @@ function mergedBlock(m, label) {
  * the thing this site refuses to hide.
  */
 function reconciliationRail(reddit, google, combined) {
-    const W = 100, H = 38, pad = 4;
+    const W = 320, H = 38, pad = 12;
     const x = (v) => pad + ((v + 1) / 2) * (W - pad * 2);
     const y = 19;
     const wrap = el("div", { class: "rail" });
-    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none",
+    // No preserveAspectRatio="none": it stretched the circles and the diamond
+    // horizontally by whatever the container happened to be.
+    const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`,
         role: "img", "aria-label": `Reddit ${fmt(reddit)}, reviews ${fmt(google)}, combined ${fmt(combined)}` });
     svg.append(svgEl("line", { class: "axis", x1: pad, x2: W - pad, y1: y, y2: y }));
     svg.append(svgEl("line", { class: "zero", x1: x(0), x2: x(0), y1: y - 9, y2: y + 9 }));
@@ -397,11 +446,11 @@ function reconciliationRail(reddit, google, combined) {
     svg.append(svgEl("line", { class: "span",
         x1: Math.min(x(reddit), x(google)), x2: Math.max(x(reddit), x(google)),
         y1: y, y2: y }));
-    svg.append(svgEl("circle", { class: "tick-a", cx: x(reddit), cy: y, r: 3.4 }));
-    svg.append(svgEl("circle", { class: "tick-b", cx: x(google), cy: y, r: 3.4 }));
+    svg.append(svgEl("circle", { class: "tick-a", cx: x(reddit), cy: y, r: 5 }));
+    svg.append(svgEl("circle", { class: "tick-b", cx: x(google), cy: y, r: 5 }));
     // The combined figure is a diamond, so it never reads as a third source.
-    const d = svgEl("rect", { class: "combined", x: x(combined) - 3.6, y: y - 3.6,
-        width: 7.2, height: 7.2, rx: 1,
+    const d = svgEl("rect", { class: "combined", x: x(combined) - 5, y: y - 5,
+        width: 10, height: 10, rx: 1.5,
         transform: `rotate(45 ${x(combined)} ${y})` });
     svg.append(d);
     for (const [v, label] of [[-1, "worse"], [1, "better"]]) {
@@ -434,7 +483,11 @@ function crossRows() {
         const google = googleValue(r);
         if (!totals || google === null || r.thin)
             continue;
-        rows.push({ store, reddit: totals.s, google, gap: google - totals.s, r });
+        const key = need("#cross-pop").value;
+        const stars = key === "norm_long" ? (r.mean_long ?? r.mean)
+            : key === "norm_recent" ? r.mean_recent
+                : r.mean;
+        rows.push({ store, reddit: totals.s, google, gap: google - totals.s, r, stars });
     }
     return rows.sort((a, b) => b.gap - a.gap);
 }
@@ -463,12 +516,13 @@ function renderCross() {
             el("td", { class: "num" }, el("span", {
                 class: Math.abs(row.gap) >= 0.5 ? "gap-big" : "muted", text: fmt(row.gap)
             })),
-            el("td", { class: "num muted", text: row.r.mean.toFixed(2) + "★" }),
-            el("td", { class: "num muted", text: row.r.n.toLocaleString() }),
+            el("td", { class: "num muted", text: row.stars.toFixed(2) + "★" }),
+            el("td", { class: "num muted", text: (need("#cross-pop").value === "norm_long"
+                    ? row.r.n_long : row.r.n).toLocaleString() }),
             el("td", { class: "num muted", text: Math.round(row.r.n_eff).toLocaleString() }),
             el("td", { class: "num muted", text: row.r.median_date }),
         ]);
-        tr.addEventListener("click", () => showStore(row.store));
+        activatable(tr, `${row.store} details`, () => showStore(row.store));
         body.append(tr);
     }
     renderCrossChart(rows);
@@ -538,8 +592,14 @@ function placeScore(place) {
     const chainCats = data().stores[place.store];
     const cat = need("#map-cat").value;
     if (cat) {
-        const cell = branchCats?.[cat] ?? chainCats?.[cat];
-        return { cell, label: cat };
+        // Say which level the figure came from. Falling back from branch to
+        // chain silently labelled a chain-wide number as this branch's.
+        const branchCell = branchCats?.[cat];
+        if (branchCell)
+            return { cell: branchCell, label: cat };
+        const chainCell = chainCats?.[cat];
+        if (chainCell)
+            return { cell: chainCell, label: `${cat}, chain-wide` };
     }
     return { cell: undefined, label: "" };
 }
@@ -570,7 +630,7 @@ function renderMap() {
         if (onlyEvidence && !place.branch)
             continue;
         const totals = data().totals[place.store];
-        const { cell } = placeScore(place);
+        const { cell, label: cellLabel } = placeScore(place);
         const rating = data().crosscheck?.locations[place.osm];
         const colourBy = need("#map-colour").value;
         const byGoogle = colourBy === "google";
@@ -610,7 +670,10 @@ function renderMap() {
             pop.append(el("div", { class: "muted", text: where }));
         if (sentiment !== undefined) {
             pop.append(el("div", {}, el("span", { class: "score " + cls(sentiment),
-                text: fmt(sentiment) + (cat ? " " + titleCase(cat) : " overall") })));
+                text: fmt(sentiment) + " "
+                    + (byGoogle ? "Google rating"
+                        : byMerged ? "combined"
+                            : cellLabel ? titleCase(cellLabel) : "overall") })));
         }
         if (cell)
             pop.append(el("div", { class: "muted", text: `${cell.n} claims` }));
@@ -832,7 +895,7 @@ function renderItems() {
             el("td", { class: "num muted", text: h.cell.p ?? "–" }),
             el("td", { class: "num muted", text: String(h.cell.n) }),
         ]);
-        tr.addEventListener("click", () => showStore(h.store));
+        activatable(tr, `${h.name} at ${h.store}`, () => showStore(h.store));
         tb.append(tr);
     }
     table.append(tb);
@@ -846,7 +909,12 @@ function renderItems() {
 const VIEWS = ["list", "compare", "cross", "map", "store", "items", "method"];
 function switchView(name) {
     for (const b of all(".tabs button")) {
-        b.classList.toggle("on", b.dataset["view"] === name);
+        const on = b.dataset["view"] === name;
+        b.classList.toggle("on", on);
+        // The tablist role is a contract: selection state and a roving tabindex
+        // are part of it, not decoration on top of it.
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.setAttribute("tabindex", on ? "0" : "-1");
     }
     for (const v of all(".view"))
         v.hidden = v.id !== "view-" + name;
@@ -932,12 +1000,33 @@ function fillCalibrationProse() {
         }
     }
 }
+/** Check the fetched document really is the payload before trusting it.
+ *
+ * `as Payload` asserted rather than verified, so a truncated or stale file
+ * became a blank page with a message only in the console. Structural, not
+ * exhaustive: it confirms the views the app indexes into actually exist.
+ */
+function isPayload(value) {
+    if (typeof value !== "object" || value === null)
+        return false;
+    const v = value;
+    const objects = ["stores", "branches", "regions", "items", "totals", "keywords", "method"];
+    for (const key of objects) {
+        if (typeof v[key] !== "object" || v[key] === null)
+            return false;
+    }
+    return Array.isArray(v["places"]) && Array.isArray(v["categories"])
+        && typeof v["generated_at"] === "string";
+}
 async function boot() {
     try {
         const res = await fetch("verdicts.json");
         if (!res.ok)
             throw new Error("HTTP " + res.status);
-        DATA = (await res.json());
+        const parsed = await res.json();
+        if (!isPayload(parsed))
+            throw new Error("verdicts.json is not the expected shape");
+        DATA = parsed;
     }
     catch (err) {
         need("#loading").textContent =
@@ -976,11 +1065,32 @@ async function boot() {
     }
     fillMethod();
     fillCalibrationProse();
+    const go = (v) => { switchView(v); renderView(v); };
     for (const b of all("[data-view]")) {
-        b.addEventListener("click", () => {
-            const v = b.dataset["view"];
-            switchView(v);
-            renderView(v);
+        b.addEventListener("click", () => go(b.dataset["view"]));
+    }
+    // Arrow keys move between tabs, Home/End jump to the ends — what a
+    // tablist is required to do once it claims the role.
+    const tabs = all(".tabs button");
+    for (const [i, tab] of tabs.entries()) {
+        tab.addEventListener("keydown", (e) => {
+            const key = e.key;
+            const step = key === "ArrowRight" ? 1 : key === "ArrowLeft" ? -1 : 0;
+            let next = -1;
+            if (step)
+                next = (i + step + tabs.length) % tabs.length;
+            else if (key === "Home")
+                next = 0;
+            else if (key === "End")
+                next = tabs.length - 1;
+            if (next < 0)
+                return;
+            e.preventDefault();
+            const target = tabs[next];
+            if (!target)
+                return;
+            target.focus();
+            go(target.dataset["view"]);
         });
     }
     need("#list-go").addEventListener("click", runList);

@@ -65,6 +65,17 @@ class TestMatchStore:
         for store in STORE_PATTERNS:
             assert locations.match_store(store) is not None, store
 
+    @pytest.mark.parametrize("name", ["Shaw’s", "Shawʼs", "Trader Joe’s"])
+    def test_typographic_apostrophes_match_too(self, name: str) -> None:
+        """Both OSM and the review dataset use curly apostrophes; the stage-1
+        patterns only know the straight one."""
+        assert locations.match_store(name) is not None
+
+    def test_two_chains_in_one_name_is_ambiguous(self) -> None:
+        """It used to return whichever came first in dict order, which is
+        not evidence about which shop the entry is."""
+        assert locations.match_store("Sapporo Ramen at HMart Costco") is None
+
     def test_bjs_restaurant_is_still_excluded(self) -> None:
         # The stage-1 pattern carries this exclusion; matching here inherits it.
         assert locations.match_store("BJ's Restaurant & Brewhouse") is None
@@ -120,7 +131,7 @@ class TestAttachBranches:
                                  "addr:city": "Burlington",
                                  "addr:street": "Middlesex Turnpike"}),
                 node(id=3, tags={"name": "Market Basket", "shop": "supermarket",
-                                 "addr:city": "Cambridge",
+                                 "addr:city": "Medford",
                                  "addr:street": "Union Square"}),
             ]
         })
@@ -138,6 +149,36 @@ class TestAttachBranches:
             self._places(), {"Market Basket": ["the Acre", "inside 128"]}
         )
         assert linked == {}
+
+    def test_a_branch_named_after_a_town_may_only_match_the_town(self) -> None:
+        """A Shaw's at 180 Cambridge Street was being filed under the
+        *Cambridge* branch. A branch whose name is one of the towns in the
+        data has to match the city field, not a street carrying the word."""
+        places = locations.extract_places({"elements": [
+            node(id=5, tags={"name": "Shaw's", "shop": "supermarket",
+                             "addr:city": "Boston",
+                             "addr:street": "Cambridge Street"}),
+            # What counts as a town is read off the data, so one pin actually
+            # in Cambridge is what makes "Cambridge" a town rather than a
+            # street name. The real corpus has many.
+            node(id=9, tags={"name": "Shaw's", "shop": "supermarket",
+                             "addr:city": "Cambridge",
+                             "addr:street": "Porter Square"}),
+        ]})
+        linked = locations.attach_branches(places, {"Shaw's": ["Cambridge", "Boston"]})
+        assert linked["node/5"] == "Boston", "the Cambridge Street shop is in Boston"
+        assert linked["node/9"] == "Cambridge", "the one actually in Cambridge"
+
+    def test_a_street_branch_that_is_not_a_town_still_matches(self) -> None:
+        """People say "the Kilmarnock Star Market"; that name never appears
+        in a city field, so dropping street matching would lose it."""
+        places = locations.extract_places({"elements": [
+            node(id=6, tags={"name": "Star Market", "shop": "supermarket",
+                             "addr:city": "Boston",
+                             "addr:street": "33 Kilmarnock Street"}),
+        ]})
+        linked = locations.attach_branches(places, {"Star Market": ["Kilmarnock"]})
+        assert linked == {"node/6": "Kilmarnock"}
 
     def test_every_word_of_the_branch_must_be_present(self) -> None:
         # "Union Square" must not match a store merely on a street called
@@ -160,6 +201,12 @@ class TestAttachBranches:
         linked = locations.attach_branches(
             self._places(), {"Star Market": ["Somerville"]}
         )
+        assert linked == {}
+
+    def test_a_branch_with_no_usable_words_is_skipped(self) -> None:
+        """`_tokens` drops words of two letters or fewer, so a branch called
+        "NH" tokenises to nothing and must not match everything."""
+        linked = locations.attach_branches(self._places(), {"Market Basket": ["NH"]})
         assert linked == {}
 
     def test_a_pin_with_no_address_is_skipped(self) -> None:

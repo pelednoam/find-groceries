@@ -80,7 +80,12 @@ class Rating(TypedDict):
     n: int
     mean: float
     norm: float          # -1..+1, comparable with our sentiment
-    #: Sample size after recency decay — what this evidence is worth *now*.
+    #: Decayed evidence: the sum of the recency weights, i.e. how many
+    #: *present-day* reviews this history is worth. Deliberately not the
+    #: effective sample size of the weighted mean, (Σw)²/Σw², which here is
+    #: 26,130 against Σw's 9,029 for Stop & Shop — that quantity answers
+    #: "how precise is this average", while the question being asked is
+    #: "how much of this still applies". Σw is the conservative of the two.
     n_eff: float
     mean_recent: float
     norm_recent: float
@@ -129,7 +134,7 @@ def _rating(
     total_w = sum(weights)
     # Effective sample size, not a count. 27,000 ratings with a 2018 median
     # are not 27,000 ratings' worth of evidence about 2026.
-    n_eff = total_w
+    n_eff = total_w  # discounted count; see the field docstring
     mean_recent = (
         sum(w * s for w, s in zip(weights, stars, strict=True)) / total_w
         if total_w > 0 else mean

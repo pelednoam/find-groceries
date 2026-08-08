@@ -82,6 +82,10 @@ setTimeout(() => {
   console.log("        " + [...$$("#tally div")].map(d =>
     d.querySelector("dt").textContent + " " + d.querySelector("dd").textContent).join("  ·  "));
   ok($$(".stages li").length === 4, "pipeline stages numbered", $$(".stages li").length);
+  ok($('meta[http-equiv="Content-Security-Policy"]') !== null, "CSP declared");
+  ok($$('.tabs button[aria-selected]').length === $$(".tabs button").length,
+     "every tab carries selection state");
+  ok($$('.tabs button[tabindex="0"]').length === 1, "roving tabindex on the tablist");
 
   console.log("\n[shopping list]");
   $("#list-input").value = "milk\nchicken\nproduce\nbread\ncoffee\nbeer";
@@ -126,6 +130,27 @@ setTimeout(() => {
   $("#cmp-min").value = "60";
   $("#cmp-min").dispatchEvent(new window.Event("input"));
   ok($$("#cmp-table tbody tr").length >= 1, "min-evidence filter works", $$("#cmp-table tbody tr").length);
+  $("#cmp-cat").value = "";
+  $("#cmp-cat").dispatchEvent(new window.Event("change"));
+  $("#cmp-min").value = "0";
+  $("#cmp-min").dispatchEvent(new window.Event("input"));
+  {
+    // Quadrant labels were mirrored: "bargain" sat over the expensive half.
+    const at = Object.fromEntries([...$$("#scatter text")]
+      .filter((t) => ["bargain", "premium"].includes(t.textContent))
+      .map((t) => [t.textContent, Number(t.getAttribute("x"))]));
+    ok(at.bargain > at.premium, "bargain sits on the cheap (right) side",
+       `bargain@${at.bargain} premium@${at.premium}`);
+  }
+  {
+    // The Price column shows -pl, so it must sort on what it shows.
+    const th = $('#cmp-table th[data-sort="price"]');
+    click(th); click(th);
+    const col = [...$$("#cmp-table tbody tr")]
+      .map((r) => parseFloat(r.children[1].textContent)).filter((v) => !isNaN(v));
+    ok(col.every((v, i) => i === 0 || col[i - 1] >= v),
+       "price column sorts on the number displayed", col.slice(0, 4).join(" "));
+  }
 
   console.log("\n[store detail]");
   click($('[data-view="store"]'));
@@ -274,6 +299,8 @@ function finish() {
  * the payload before fetch resolves rather than reaching into the app. */
 function xssRun() {
   console.log("\n[xss containment — poisoned payload]");
+  // The map popup builds nodes and hands them to Leaflet; it is the one
+  // path the earlier poisoned run never exercised.
   const evil = JSON.parse(payload);
   const hostile = "<img src=x onerror=alert(1)><script>alert(2)</" + "script>";
   evil.stores["Market Basket"] = {
@@ -283,6 +310,10 @@ function xssRun() {
   };
   evil.items["Market Basket"] = { [hostile]: { n: 1, w: 9, s: 0.5, e: [] } };
   evil.totals["Market Basket"] = { n: 1, w: 9, s: 0.5, thin: false };
+  // The map popup never shows claim text, but it does show OpenStreetMap
+  // address strings — third-party too, and rendered into the same node.
+  evil.places = [{ store: "Market Basket", name: hostile, lat: 42.37, lon: -71.11,
+                   address: hostile, city: hostile, osm: "node/1", branch: hostile }];
 
   const vc2 = new VirtualConsole();
   vc2.on("jsdomError", (e) => { failures++; console.log("  JSDOM ERROR: " + e.message); });
@@ -313,6 +344,24 @@ function xssRun() {
     ok(bad.length === 0, "javascript: permalink refused",
        bad.map((a) => a.getAttribute("href")).join(","));
     ok(!alerted, "no script executed");
+
+    // The map popup builds nodes and hands them to Leaflet — the one path
+    // the earlier poisoned run never exercised.
+    const made = { markers: [] };
+    const layer = { clearLayers(){ made.markers.length = 0; }, addTo(){ return this; } };
+    w2.L = { map(){ return { setView(){ return this; }, invalidateSize(){} }; },
+      tileLayer(){ return { addTo(){ return this; } }; },
+      layerGroup(){ return layer; },
+      circleMarker(){ return { popup: null, bindPopup(n){ this.popup = n; return this; },
+        addTo(){ made.markers.push(this); return this; } }; } };
+    d.querySelector('[data-view="map"]').dispatchEvent(
+      new w2.MouseEvent("click", { bubbles: true }));
+    const popups = made.markers.filter((m) => m.popup);
+    ok(popups.length > 0, "poisoned payload still renders pins", popups.length);
+    ok(popups.every((m) => !m.popup.querySelector("img,script")),
+       "no popup turned hostile markup into an element");
+    ok(popups.some((m) => m.popup.textContent.includes("<img")),
+       "a hostile OSM address is shown literally, not parsed");
 
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
     process.exit(failures ? 1 : 0);

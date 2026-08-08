@@ -23,7 +23,7 @@ from groceries.site import build_payload, write_payload  # noqa: E402
 SITE_DATA = ROOT / "docs" / "verdicts.json"
 LOCATIONS = DATA / "locations.json"
 CROSSCHECK = DATA / "crosscheck.json"
-REVIEW_VERDICTS = DATA / "extraction" / "review_verdicts.json"
+REVIEW_VERDICTS = DATA / "extraction" / "reviews_verdicts.json"
 
 
 def build_parser() -> argparse.ArgumentParser:

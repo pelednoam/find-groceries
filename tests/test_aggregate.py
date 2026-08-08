@@ -202,8 +202,7 @@ class TestValidation:
         ("field", "value"),
         [
             ("score", "12"), ("score", True), ("transient", "yes"),
-            ("location", 5), ("item", []), ("comparator_store", None),
-            ("author", 7),
+            ("location", 5), ("item", []), ("author", 7),
         ],
     )
     def test_rejects_fields_that_crash_the_maths(self, field: str, value: Any) -> None:
@@ -217,6 +216,19 @@ class TestValidation:
         row = dict(claim())
         row.pop(field)
         assert aggregate._is_valid(row)
+
+    @pytest.mark.parametrize("field", ["location", "item", "comparator_store"])
+    def test_a_null_is_absence_not_corruption(self, field: str) -> None:
+        """A JSON null is the most likely shape of a missing field in a real
+        claims file. Rejecting the whole claim over it discarded evidence
+        because an `item` was not filled in."""
+        assert aggregate._is_valid({**claim(), field: None})
+
+    def test_a_null_optional_field_reads_back_as_empty(self, tmp_path: Path) -> None:
+        p = tmp_path / "c.jsonl"
+        p.write_text(json.dumps({**claim(), "item": None}), encoding="utf-8")
+        claims, dropped = aggregate.read_claims(p)
+        assert dropped == 0 and claims[0]["item"] == ""
 
     def test_a_null_score_is_allowed(self) -> None:
         assert aggregate._is_valid({**claim(), "score": None})
@@ -510,6 +522,31 @@ class TestHeadlineHalfLife:
 
     def test_no_evidence_falls_back_to_the_default(self) -> None:
         assert aggregate.headline_half_life({}) == aggregate.DEFAULT_HALF_LIFE_YEARS
+
+    def test_a_nonsense_horizon_falls_back(self) -> None:
+        cells, _ = aggregate.build([claim()], NOW)
+        chain = aggregate.chain_rollup(cells)
+        assert aggregate.headline_half_life(chain, 0.0) == \
+            aggregate.DEFAULT_HALF_LIFE_YEARS
+
+    def test_it_reproduces_the_mixture_at_the_horizon(self) -> None:
+        """A mixture of exponentials is not an exponential, so averaging the
+        half-lives is simply wrong — it gave 4.72y where the truth at the
+        relevant horizon is 4.35y, letting a second source keep ~6% more
+        weight than the corpus it is compared against."""
+        cells, _ = aggregate.build(
+            [claim(category="price_overall"),                 # 7y
+             claim(category="crowding_hours", claim="x")],    # 2y
+            NOW,
+        )
+        chain = aggregate.chain_rollup(cells)
+        for horizon in (2.0, 5.0, 9.0):
+            hl = aggregate.headline_half_life(chain, horizon)
+            mixture = sum(
+                c.weight * 0.5 ** (horizon / aggregate.half_life_for(cat))
+                for (_s, cat), c in chain.items()
+            ) / sum(c.weight for c in chain.values())
+            assert 0.5 ** (horizon / hl) == pytest.approx(mixture, rel=1e-9)
 
     def test_it_reaches_the_verdict_document(self) -> None:
         out = aggregate.aggregate([claim()], now=NOW, min_weight=0.0)

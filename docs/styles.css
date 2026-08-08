@@ -23,16 +23,17 @@
   --ink:         #0c1512;
   --ink-2:       #16211d;
   --body:        #364a43;
-  --muted:       #6b7d75;
+  --muted:       #55665e;   /* 5.9:1 on --page; was 4.1:1 */
 
+  --on-ink:      #ffffff;
   --surface:     #ffffff;
   --page:        #f7f9f7;
   --line:        #e2e9e5;
   --line-strong: #cbd7d1;
 
-  --good:        #0f8a5f;
-  --bad:         #c8442f;
-  --warn:        #b3801a;
+  --good:        #0a6e4b;   /* 4.9:1; was 3.2:1 */
+  --bad:         #b03a26;   /* 5.2:1 */
+  --warn:        #8a6112;   /* 5.1:1; was 2.9:1 */
 
   --r:      14px;
   --r-lg:   22px;
@@ -53,6 +54,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+  --on-ink:      #0c110f;
     --brand:       #3ecfa5;
     --brand-deep:  #2bb08a;
     --brand-tint:  #12251f;
@@ -74,6 +76,7 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --on-ink:      #0c110f;
   --brand:       #3ecfa5;
   --brand-deep:  #2bb08a;
   --brand-tint:  #12251f;
@@ -202,7 +205,7 @@ nav.tabs .inner::-webkit-scrollbar { display: none; }
   transition: background .16s, color .16s;
 }
 .tabs button:hover { color: var(--ink); background: var(--line); }
-.tabs button.on { background: var(--ink); color: #fff; }
+.tabs button.on { background: var(--ink); color: var(--on-ink); }
 
 main { padding: 46px 0 110px; }
 
@@ -267,9 +270,9 @@ button.primary, button.ghost {
   transition: transform .12s, box-shadow .16s, background .16s, color .16s;
 }
 button.primary {
-  background: var(--ink); color: #fff; border: 0; box-shadow: var(--shadow);
+  background: var(--ink); color: var(--on-ink); border: 0; box-shadow: var(--shadow);
 }
-button.primary:hover { background: var(--brand); transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+button.primary:hover { background: var(--brand); color: var(--on-ink); transform: translateY(-1px); box-shadow: var(--shadow-lg); }
 button.primary:active { transform: none; }
 button.ghost { background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); }
 button.ghost:hover { border-color: var(--ink); transform: translateY(-1px); }
@@ -363,7 +366,10 @@ table.data td {
 table.data tbody tr:last-child td { border-bottom: 0; }
 table.data th.num, table.data td.num { text-align: right; font-family: var(--mono); }
 table.data tbody tr { cursor: pointer; transition: background .13s; }
-table.data tbody tr:hover { background: var(--brand-tint); }
+table.data tbody tr:hover, table.data tbody tr:focus-visible { background: var(--brand-tint); }
+table.data tbody tr:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.card:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+#scatter .dot:focus-visible { outline: none; stroke: var(--ink); stroke-width: 3; }
 
 /* ── evidence ─────────────────────────────────────────────────────── */
 details.cell {

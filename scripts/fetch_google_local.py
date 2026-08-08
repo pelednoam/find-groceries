@@ -126,8 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\npass 2: streaming reviews (785MB, ~4 min) …")
     per: collections.Counter[str] = collections.Counter()
     scanned = kept = 0
+    # Write to a partial file and rename only on success. A connection that
+    # drops at 80% otherwise leaves a perfectly readable gzip that every
+    # later stage treats as the whole corpus.
+    partial = reviews_path.with_suffix(reviews_path.suffix + ".part")
     try:
-        with gzip.open(reviews_path, "wt", encoding="utf-8") as out:
+        with gzip.open(partial, "wt", encoding="utf-8") as out:
             for line in stream_lines(f"{BASE}/review-{args.state}.json.gz", args.timeout):
                 scanned += 1
                 if scanned % 2_000_000 == 0:
@@ -143,8 +147,15 @@ def main(argv: list[str] | None = None) -> int:
                 kept += 1
                 per[store] += 1
     except requests.RequestException as exc:
+        partial.unlink(missing_ok=True)
         print(f"download failed after {kept:,} reviews: {exc}")
+        print("Partial output discarded; rerun to start again.")
         return 1
+    if kept == 0:
+        partial.unlink(missing_ok=True)
+        print("refusing to write: the stream matched no known store.")
+        return 1
+    partial.replace(reviews_path)
 
     print(f"\nscanned {scanned:,}, kept {kept:,}")
     for store, n in per.most_common():

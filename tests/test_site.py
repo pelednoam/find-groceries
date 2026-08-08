@@ -357,6 +357,23 @@ class TestReviewMergeInPayload:
         for leak in ('"claim"', '"evidence"', '"t"', '"permalink"'):
             assert leak not in blob, leak
 
+    def test_a_store_absent_from_the_review_corpus_has_no_google_side(self) -> None:
+        v = self._verdicts8()
+        r = self._reviews()
+        del r["store_totals"]["S5"]
+        out = site.build_payload(v, None, None, r)
+        assert "g" not in out["reviews"]["stores"]["S5"]
+
+    def test_an_older_verdicts_file_still_merges_review_claims(self) -> None:
+        """`_merge_block` had a fallback for pre-`score` files and
+        `_review_block` did not, so a stale verdicts file silently produced
+        no claim merge while the star merge beside it kept working."""
+        v = self._verdicts8()
+        for t in v["store_totals"].values():
+            del t["score"], t["valenced_weight"]
+        out = site.build_payload(v, None, None, self._reviews())
+        assert out["reviews"] is not None and len(out["reviews"]["stores"]) == 8
+
     def test_a_store_with_no_valenced_claims_is_skipped(self) -> None:
         r = self._reviews()
         r["store_totals"]["S0"].update(score=0.0, valenced_weight=0.0,
@@ -376,6 +393,75 @@ class TestReviewMergeInPayload:
         for t in r["store_totals"].values():
             t["n_claims"] = 1
         assert site.build_payload(self._verdicts8(), None, None, r)["reviews"] is None
+
+
+class TestPublishingBoundary:
+    """The licence rule, enforced rather than merely true.
+
+    Four independent reviewers made the same point: nothing checked that
+    review text stays out of the published payload — it held only because
+    `_review_block` happens to emit numbers, and `slim_cell` would print the
+    text of any cell handed to it. A property that survives by construction
+    is one refactor from being false.
+    """
+
+    def _payload(self, **over: Any) -> dict[str, Any]:
+        p = site.build_payload(verdicts())
+        p.update(over)
+        return p
+
+    def test_a_clean_payload_passes(self) -> None:
+        site.assert_publishable(self._payload())
+
+    @pytest.mark.parametrize("field", ["t", "claim", "evidence", "permalink",
+                                       "user_id", "name"])
+    def test_review_text_or_identity_is_refused(self, field: str) -> None:
+        bad = self._payload(reviews={"stores": {"S": {"v": 1, field: "leak"}}})
+        with pytest.raises(site.PublishingError, match=field):
+            site.assert_publishable(bad)
+
+    def test_it_looks_all_the_way_down(self) -> None:
+        buried = {"a": {"b": [{"c": {"claim": "deep leak"}}]}}
+        with pytest.raises(site.PublishingError):
+            site.assert_publishable(self._payload(reviews=buried))
+
+    def test_the_dataset_citation_is_required(self) -> None:
+        """Publishing statistics from the licensed set without crediting it
+        is the one thing the licence actually asks for."""
+        with pytest.raises(site.PublishingError, match="citation"):
+            site.assert_publishable(self._payload(crosscheck={"stores": {}}))
+        site.assert_publishable(
+            self._payload(crosscheck={"stores": {}, "citation": "McAuley Lab, UCSD"})
+        )
+
+    @pytest.mark.parametrize("field", ["text", "user_id", "author"])
+    def test_the_crosscheck_may_not_carry_identity(self, field: str) -> None:
+        bad = self._payload(crosscheck={"citation": "x", "stores": {"S": {field: "u"}}})
+        with pytest.raises(site.PublishingError):
+            site.assert_publishable(bad)
+
+    def test_an_evidence_quote_must_be_traceable(self) -> None:
+        """A quote with no reddit permalink is either mis-sourced or from the
+        licensed dataset. Either way it must not ship."""
+        p = self._payload()
+        first = next(iter(p["stores"].values()))
+        next(iter(first.values()))["e"][0]["u"] = "https://maps.google.com/x"
+        with pytest.raises(site.PublishingError, match="permalink"):
+            site.assert_publishable(p)
+
+    def test_write_payload_refuses_rather_than_leaking(self, tmp_path: Path) -> None:
+        out = tmp_path / "v.json"
+        with pytest.raises(site.PublishingError):
+            site.write_payload(self._payload(reviews={"x": {"claim": "leak"}}), out)
+        assert not out.exists(), "a refused build must not leave a file behind"
+
+    def test_non_finite_numbers_are_refused(self, tmp_path: Path) -> None:
+        """Python writes NaN and Infinity happily; JSON.parse rejects them,
+        so the site would fail to load at all."""
+        p = self._payload()
+        next(iter(next(iter(p["stores"].values())).values()))["s"] = float("nan")
+        with pytest.raises(ValueError):
+            site.write_payload(p, tmp_path / "v.json")
 
 
 class TestSlimCell:
@@ -546,6 +632,21 @@ class TestPayloadContract:
             for line in body.splitlines()
             if line.strip() and not line.strip().startswith(("/", "*"))
         }
+
+    def test_every_declared_interface_matches_what_python_emits(self) -> None:
+        """The previous version checked three interfaces by name, so
+        `MergeBlock` silently lost `branch_calibration` — declared nowhere,
+        emitted always, and read by no checker on either side."""
+        payload = site.build_payload(
+            verdicts(), locations(), {"stores": {}, "locations": {},
+                                      "citation": "x"},
+        )
+        merged = payload.get("merged")
+        if merged is not None:
+            assert set(merged) <= self._interface("MergeBlock"), (
+                set(merged) - self._interface("MergeBlock")
+            )
+        assert set(payload["places"][0]) <= self._interface("Place")
 
     def test_the_rating_shape_matches_too(self) -> None:
         """Rating gained n_eff/mean_recent/norm_recent when decay landed; the

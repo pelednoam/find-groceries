@@ -60,9 +60,13 @@ class TestFitCalibration:
         assert noisy.r2 < clean.r2
         assert noisy.loo_rmse > clean.loo_rmse
 
-    def test_a_vertical_input_does_not_divide_by_zero(self) -> None:
-        cal = merge.fit_calibration([(0.5, 0.1), (0.5, 0.2), (0.5, 0.3), (0.5, 0.4)])
-        assert cal is not None and cal.slope == 0.0
+    def test_an_input_with_no_spread_cannot_be_calibrated(self) -> None:
+        """Every Google value identical means there is no map to learn. It
+        used to return a slope-0 line whose leave-one-out folds all
+        "predicted" zero, manufacturing a residual out of nothing."""
+        assert merge.fit_calibration(
+            [(0.5, 0.1), (0.5, 0.2), (0.5, 0.3), (0.5, 0.4)]
+        ) is None
 
     def test_apply_is_the_fitted_line(self) -> None:
         cal = merge.fit_calibration(line(2.0, -1.0))
@@ -80,12 +84,23 @@ class TestFitCalibration:
         assert abs(tight.slope - 2.8) < abs(loose.slope - 2.8)
         assert tight.slope == pytest.approx(2.8, abs=0.05)
 
-    def test_one_weighted_point_does_not_crash_the_leave_one_out(self) -> None:
-        """Dropping the only point with weight leaves nothing to fit; the
-        fold has to return something rather than divide by zero."""
+    def test_a_fold_with_nothing_to_fit_is_skipped_not_faked(self) -> None:
+        """It used to `_ols` an empty set, get (0, 0) back, and record the
+        whole target as error — inflating the floor on the other source's
+        precision from a fold that had no opinion at all."""
         pairs = line(2.8, -1.7, n=5)
         cal = merge.fit_calibration(pairs, [1.0] + [0.0] * 4)
-        assert cal is not None and math.isfinite(cal.loo_rmse)
+        assert cal is None or cal.loo_rmse < 1.0
+
+    def test_a_degenerate_fold_does_not_inflate_the_floor(self) -> None:
+        clean = merge.fit_calibration(line(2.8, -1.7, n=6), [10.0] * 6)
+        assert clean is not None
+        assert clean.residual_sd < 1e-6, clean.residual_sd
+
+    def test_a_fit_whose_every_fold_is_degenerate_is_refused(self) -> None:
+        """Better no calibration than one whose error bar was manufactured
+        by folds that had nothing to fit."""
+        assert merge.fit_calibration([(0.5, 0.1)] * 5, [1.0] + [0.0] * 4) is None
 
     def test_zero_total_weight_is_refused(self) -> None:
         assert merge.fit_calibration(line(2.8, -1.7), [0.0] * 20) is None
@@ -187,7 +202,9 @@ class TestCombine:
         assert m is not None and m.reddit is None
 
     def test_too_few_ratings_are_ignored(self) -> None:
-        m = merge.combine(4.0, 10.0, rating(n=merge.MIN_GOOGLE_RATINGS - 1), self._cal())
+        m = merge.combine(
+            4.0, 10.0, rating(n=int(merge.MIN_GOOGLE_EVIDENCE) - 1), self._cal()
+        )
         assert m is not None and m.google is None and m.reddit_share == 1.0
 
     def test_no_calibration_means_reddit_only(self) -> None:

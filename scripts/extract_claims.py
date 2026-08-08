@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
 import sys
@@ -107,11 +108,19 @@ def output_paths(args: argparse.Namespace) -> Paths:
     if args.working_set.resolve() == WORKING_SET.resolve():
         default = Paths(claims=CLAIMS, done=DONE, failed=FAILED)
     else:
+        # The stem alone collides: reviews_working_set.jsonl in two different
+        # directories, or `a/set.jsonl` and `b/set.jsonl`, would share a
+        # resume log — the failure that silently marks one corpus's
+        # documents done for the other. A digest of the resolved path
+        # distinguishes them without making the names unreadable.
         stem = args.working_set.stem.replace("_working_set", "")
+        tag = hashlib.sha256(
+            str(args.working_set.resolve()).encode()
+        ).hexdigest()[:6]
         d = args.working_set.parent
         default = Paths(
             claims=d / f"{stem}_claims.jsonl",
-            done=d / f"{stem}_done.txt",
+            done=d / f"{stem}_done-{tag}.txt",
             failed=d / f"{stem}_failed.jsonl",
         )
     return Paths(

@@ -17,7 +17,7 @@ import json
 import math
 import re
 from dataclasses import replace
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -162,15 +162,18 @@ def _review_block(
     r_totals = verdicts["store_totals"]
     g_totals = reviews["store_totals"]
 
+    # `_evidence` carries the same older-file fallback `_merge_block` uses;
+    # without it a stale verdicts file produced no claim merge at all while
+    # the star merge beside it carried on working.
     fittable = [
         s for s in set(r_totals) & set(g_totals)
-        if float(r_totals[s].get("valenced_weight", 0)) > 0
-        and float(g_totals[s].get("valenced_weight", 0)) > 0
+        if _evidence(r_totals[s])[1] > 0
+        and _evidence(g_totals[s])[1] > 0
         and int(g_totals[s]["n_claims"]) >= MIN_CLAIMS_TO_CALIBRATE
         and int(r_totals[s]["n_claims"]) >= MIN_CLAIMS_TO_CALIBRATE
     ]
     pairs = [(_raw_mean(g_totals[s]), _raw_mean(r_totals[s])) for s in fittable]
-    weights = [float(r_totals[s]["valenced_weight"]) for s in fittable]
+    weights = [_evidence(r_totals[s])[1] for s in fittable]
     cal = fit_calibration(pairs, weights)
     if cal is None:
         return None
@@ -320,7 +323,7 @@ def _pooled_branches(
     for place in places:
         branch = place.get("branch")
         rating = by_osm.get(place["osm"])
-        if branch and rating and _usable(rating):
+        if branch and rating is not None and _usable(rating):
             grouped.setdefault((place["store"], branch), []).append(rating)
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for key, ratings in grouped.items():
@@ -525,8 +528,82 @@ def build_payload(
     }
 
 
+class PublishingError(RuntimeError):
+    """The payload broke a rule it is not allowed to break."""
+
+
+def assert_publishable(payload: Mapping[str, Any]) -> None:
+    """Enforce, at the boundary, what the licence and the docs promise.
+
+    The Google review dataset is offered for research with citation.
+    Aggregate statistics derived from it may be published; the review prose,
+    the model's paraphrase of it, and any author identity may not.
+
+    Until now that held only because `_review_block` happens to emit numbers
+    and review claims happen never to reach `slim_cell` — which would print
+    their text quite happily. Four independent reviewers made the same point:
+    a safety property that is true by construction rather than by check is
+    one refactor away from being false. So it is checked here, on the object
+    about to be written, and the build fails rather than the site leaking.
+    """
+    review = payload.get("reviews")
+    if review is not None:
+        for banned in ("t", "claim", "evidence", "permalink", "user_id", "name"):
+            if _contains_key(review, banned):
+                raise PublishingError(
+                    f"review-derived block carries '{banned}': only counts and "
+                    "means may be published from the licensed dataset"
+                )
+    cross = payload.get("crosscheck")
+    if cross is not None:
+        for banned in ("text", "user_id", "author"):
+            if _contains_key(cross, banned):
+                raise PublishingError(f"cross-check block carries '{banned}'")
+        if not str(cross.get("citation", "")).strip():
+            raise PublishingError(
+                "the review dataset requires citation; none is in the payload"
+            )
+    # Evidence quotes are Reddit's, and every one must be traceable. A quote
+    # with no reddit permalink is either mis-sourced or from the licensed set.
+    for view in ("stores", "branches", "regions", "items"):
+        for quote in _quotes(payload.get(view, {})):
+            if not str(quote.get("u", "")).startswith("/r/"):
+                raise PublishingError(
+                    f"{view}: an evidence quote has no reddit permalink "
+                    f"({quote.get('u')!r})"
+                )
+
+
+def _contains_key(node: Any, key: str) -> bool:
+    if isinstance(node, dict):
+        return key in node or any(_contains_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains_key(v, key) for v in node)
+    return False
+
+
+def _quotes(node: Any) -> Iterator[Mapping[str, Any]]:
+    """Every evidence entry anywhere under a published view."""
+    if isinstance(node, dict):
+        entries = node.get("e")
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict):
+                    yield entry
+        for value in node.values():
+            yield from _quotes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _quotes(value)
+
+
 def write_payload(payload: Mapping[str, Any], path: Path) -> int:
     """Write the payload as compact JSON. Returns bytes written."""
-    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    assert_publishable(payload)
+    # allow_nan=False: Python emits NaN/Infinity, which are not JSON and
+    # which JSON.parse rejects — the site would fail to load entirely.
+    blob = json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
     write_atomic(path, [blob])
     return len(blob.encode("utf-8"))

@@ -104,20 +104,38 @@ def attach_place(
     claims: Iterable[SourcedClaim],
     doc_to_place: Mapping[str, str],
     branches: Mapping[str, str],
-) -> list[SourcedClaim]:
+    reviewed: Mapping[str, str],
+) -> tuple[list[SourcedClaim], int, int]:
     """Replace the model's guessed `location` with the branch we already know.
 
     Stage 2 reads a branch out of the prose because that is all a Reddit
     comment offers. Here the shop is a fact of the record, so the guess is
     strictly worse than the truth — and a wrong branch silently splits one
     store's evidence in two.
+
+    `reviewed` maps a document to the store it is a review *of*. A review
+    says several things about its own shop and occasionally one about a
+    rival; 1,399 such claims exist in this corpus, and giving them the
+    reviewed shop's address filed Trader Joe's evidence at a Whole Foods
+    one. Those are left unplaced instead.
+
+    Returns (claims, n_placed, n_about_another_chain).
     """
     out: list[SourcedClaim] = []
+    placed = foreign = 0
     for claim in claims:
-        place = doc_to_place.get(claim["source_id"])
-        branch = branches.get(place or "", "")
+        doc = claim["source_id"]
         updated = dict(claim)
-        updated["location"] = branch
-        updated["gmap_id"] = place or ""
+        if claim.get("store") != reviewed.get(doc):
+            foreign += 1
+            updated["location"] = ""
+            updated["gmap_id"] = ""
+        else:
+            place = doc_to_place.get(doc, "")
+            branch = branches.get(place, "")
+            updated["location"] = branch
+            updated["gmap_id"] = place
+            if branch:
+                placed += 1
         out.append(updated)  # type: ignore[arg-type]
-    return out
+    return out, placed, foreign

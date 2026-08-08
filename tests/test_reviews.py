@@ -95,17 +95,43 @@ class TestAttachPlace:
         base.update(over)
         return base
 
+    REVIEWED = {"d1": "Aldi"}
+
     def test_the_known_branch_overrides_the_guess(self) -> None:
-        got = reviews.attach_place(
-            [self._claim()], {"d1": "g1"}, {"g1": "Somerville"}
+        got, placed, foreign = reviews.attach_place(
+            [self._claim()], {"d1": "g1"}, {"g1": "Somerville"}, self.REVIEWED
         )
         assert got[0]["location"] == "Somerville"
+        assert (placed, foreign) == (1, 0)
 
     def test_an_unmatched_place_clears_the_guess(self) -> None:
         """Better no branch than a branch the model imagined."""
-        got = reviews.attach_place([self._claim()], {"d1": "g9"}, {})
-        assert got[0]["location"] == ""
+        got, placed, _ = reviews.attach_place(
+            [self._claim()], {"d1": "g9"}, {}, self.REVIEWED
+        )
+        assert got[0]["location"] == "" and placed == 0
 
     def test_the_place_is_recorded(self) -> None:
-        got = reviews.attach_place([self._claim()], {"d1": "g1"}, {"g1": "X"})
+        got, _, _ = reviews.attach_place(
+            [self._claim()], {"d1": "g1"}, {"g1": "X"}, self.REVIEWED
+        )
         assert got[0]["gmap_id"] == "g1"
+
+    def test_a_claim_about_another_chain_is_not_given_this_address(self) -> None:
+        """A review of Whole Foods that also praises Trader Joe's produced a
+        Trader Joe's claim tagged with the Whole Foods branch — 1,068 of
+        them in the real corpus, filed at the wrong shop."""
+        rival = self._claim(store="Trader Joe's")
+        got, placed, foreign = reviews.attach_place(
+            [rival], {"d1": "g1"}, {"g1": "Somerville"}, {"d1": "Whole Foods"}
+        )
+        assert got[0]["location"] == "" and got[0]["gmap_id"] == ""
+        assert (placed, foreign) == (0, 1)
+
+    def test_a_claim_about_the_reviewed_shop_is_placed(self) -> None:
+        got, placed, foreign = reviews.attach_place(
+            [self._claim(store="Whole Foods")], {"d1": "g1"},
+            {"g1": "Somerville"}, {"d1": "Whole Foods"}
+        )
+        assert got[0]["location"] == "Somerville"
+        assert (placed, foreign) == (1, 0)

@@ -51,12 +51,23 @@ from typing import Any, Final
 # +-1 with some neutrals, so ~1.0; it sets the scale of Reddit's error bar,
 # not its centre.
 CLAIM_SPREAD: Final = 1.0
+# The reduction to stage 3's `score/(vw + k)` holds only while CLAIM_SPREAD
+# is 1: `reddit_variance` is spread^2/vw, so precision is vw/spread^2 and the
+# shrink term `precision/(precision + PRIOR_WEIGHT)` matches stage 3's
+# `vw/(vw + k)` only when the spread divides out. Change one and the merge
+# stops agreeing with the aggregation it is built on.
+assert CLAIM_SPREAD == 1.0, "the reduction to stage 3 depends on this"
 # The pull toward neutral, applied once to the *combination*. Same constant
 # as stage 3's, so that with Google absent this reduces to exactly the
 # sentiment stage 3 already publishes — see `combine`.
 PRIOR_WEIGHT: Final = 2.0
-# Below this many ratings a Google mean is a mood, not a measurement.
-MIN_GOOGLE_RATINGS: Final = 20
+# Below this much *decayed* evidence a Google mean is a mood, not a
+# measurement. It is compared against `n_eff`, not the raw count: 20 ratings
+# from 2016 are not 20 ratings' worth of evidence about now.
+MIN_GOOGLE_EVIDENCE: Final = 20.0
+#: Retained under its old name; the value is unchanged and the comparison
+#: has always been against decayed evidence.
+MIN_GOOGLE_RATINGS: Final = MIN_GOOGLE_EVIDENCE
 # Flag when the two sources are further apart than this many combined
 # standard errors. At 2.0 it fires on genuine conflict, not on noise.
 DISAGREEMENT_SIGMAS: Final = 2.0
@@ -141,21 +152,35 @@ def fit_calibration(
     intercept, slope = _ols(goo, red, ws)
     resid = [r - (intercept + slope * g) for g, r in zip(goo, red, strict=True)]
 
-    # Leave-one-out, so the reported error is out-of-sample.
-    loo: list[float] = []
+    # Leave-one-out, so the reported error is out-of-sample. A fold whose
+    # remaining points carry no weight cannot fit anything; `_ols` would
+    # return (0, 0) and "predict" zero, turning a degenerate fold into a
+    # large fake residual and inflating the floor on the other source's
+    # precision. Such folds are skipped instead.
+    loo: list[tuple[float, float]] = []
     for i in range(len(pairs)):
         keep = [j for j in range(len(pairs)) if j != i]
+        if sum(ws[j] for j in keep) <= 0 or not any(
+            goo[j] != goo[keep[0]] for j in keep
+        ):
+            continue
         a, b = _ols([goo[j] for j in keep], [red[j] for j in keep],
                     [ws[j] for j in keep])
-        loo.append(red[i] - (a + b * goo[i]))
+        loo.append((red[i] - (a + b * goo[i]), ws[i]))
+    if not loo:
+        return None
 
     total = sum(ws)
     wmean = sum(r * w for r, w in zip(red, ws, strict=True)) / total
     var_red = sum(w * (r - wmean) ** 2 for r, w in zip(red, ws, strict=True)) / total
     var_res = sum(w * e**2 for e, w in zip(resid, ws, strict=True)) / total
     # Weighted too: the error that matters is the error at stores whose true
-    # value is actually known.
-    loo_mse = sum(w * e**2 for e, w in zip(loo, ws, strict=True)) / total
+    # value is actually known. That does mean the floor below is measured
+    # where the target is best determined, which understates typical error
+    # at thin cells — `_branch_calibration` in site.py re-measures it where
+    # it will actually be applied for exactly that reason.
+    loo_weight = sum(w for _, w in loo)
+    loo_mse = sum(w * e**2 for e, w in loo) / loo_weight if loo_weight else 0.0
     return Calibration(
         intercept=intercept,
         slope=slope,
@@ -315,7 +340,7 @@ def combine(
     have_google = (
         rating is not None
         and cal is not None
-        and float(rating.get("n_eff", rating["n"])) >= MIN_GOOGLE_RATINGS
+        and float(rating.get("n_eff", rating["n"])) >= MIN_GOOGLE_EVIDENCE
     )
     if not have_reddit and not have_google:
         return None

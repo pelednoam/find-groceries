@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from groceries.crosscheck import match_to_places  # noqa: E402
 from groceries.locations import attach_branches  # noqa: E402
+from groceries.reviews import attach_place  # noqa: E402
 from groceries.jsonl import read_jsonl, write_atomic  # noqa: E402
 from groceries.paths import DATA, EXTRACT_DIR  # noqa: E402
 
@@ -40,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--meta", type=Path, default=GL / "matched_meta.json")
     parser.add_argument("--locations", type=Path, default=DATA / "locations.json")
     parser.add_argument("--out", type=Path, default=OUT)
+    parser.add_argument("--working-set", type=Path,
+                        default=EXTRACT_DIR / "reviews_working_set.jsonl")
     parser.add_argument("--verdicts", type=Path,
                         default=EXTRACT_DIR / "store_verdicts.json")
     return parser
@@ -47,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    for path in (args.claims, args.places, args.meta, args.locations):
+    for path in (args.claims, args.places, args.meta, args.locations,
+                 args.working_set):
         if not path.exists():
             print(f"missing {path}")
             return 2
@@ -72,19 +76,20 @@ def main(argv: list[str] | None = None) -> int:
         g: osm_to_branch.get(o, "") for g, o in gmap_to_osm.items()
     }
 
-    placed = 0
-    overruled = 0
-    out = []
-    for claim in claims:
-        gmap = doc_to_place.get(str(claim.get("source_id", "")), "")
-        branch = gmap_to_branch.get(gmap, "")
-        if claim.get("location") and claim["location"] != branch:
-            overruled += 1
-        claim["location"] = branch
-        claim["gmap_id"] = gmap
-        if branch:
-            placed += 1
-        out.append(claim)
+    # Which store each document is a review *of*, so a claim about a rival
+    # does not inherit this shop's address.
+    docs, _bad = read_jsonl(args.working_set)
+    reviewed = {
+        str(d["id"]): str((d.get("stores") or [""])[0]) for d in docs
+    }
+    before = {c.get("source_id"): c.get("location") for c in claims}
+    out, placed, foreign = attach_place(
+        claims, doc_to_place, gmap_to_branch, reviewed
+    )
+    overruled = sum(
+        1 for c in out
+        if before.get(c.get("source_id")) and before[c.get("source_id")] != c["location"]
+    )
 
     n = write_atomic(
         args.out, (json.dumps(c, ensure_ascii=False) + "\n" for c in out)
@@ -92,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{n:,} claims  ({bad} unparseable lines skipped)")
     print(f"  placed at a named branch      {placed:,} ({placed / max(n, 1):.0%})")
     print(f"  model's guess overruled       {overruled:,}")
+    print(f"  about another chain, unplaced {foreign:,}")
     print(f"  listings matched to a pin     {len(gmap_to_osm)} of {len(google_places)}")
     print(f"\nwrote {args.out}")
     return 0

@@ -152,6 +152,8 @@ interface MergeCalibration {
 
 interface MergeBlock {
   calibration: MergeCalibration;
+  /** the same line, with an error bar measured at branch level */
+  branch_calibration: MergeCalibration;
   stores: Record<string, MergedValue>;
   branches: Record<string, Record<string, MergedValue>>;
   note: string;

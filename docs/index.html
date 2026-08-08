@@ -6,6 +6,10 @@
 <title>Basket — where to buy groceries in Cambridge</title>
 <meta name="description" content="Grocery store price and quality signals for Cambridge and Boston, aggregated from 9.6M Reddit posts and comments.">
 <meta name="theme-color" content="#0c1512">
+<!-- The "textContent, never innerHTML" rule is enforced in code and by test;
+     this makes the browser enforce it too. No inline script, no third-party
+     origin except OpenStreetMap tiles. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23c6f24e'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='800' text-anchor='middle' fill='%230c1512'>B</text></svg>">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="styles.css">

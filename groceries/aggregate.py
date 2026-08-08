@@ -324,8 +324,12 @@ def _is_valid(row: Any) -> bool:
         return False
     if not isinstance(row.get("transient", False), bool):
         return False
+    # A null here is the field being absent, spelled differently — the most
+    # likely shape of a real claims file. Rejecting the whole claim for it
+    # discarded evidence over a missing `item`.
     if any(
-        f in row and not isinstance(row[f], str) for f in OPTIONAL_STRING_FIELDS
+        row.get(f) is not None and not isinstance(row[f], str)
+        for f in OPTIONAL_STRING_FIELDS
     ):
         return False
     return all(isinstance(row.get(f), str) for f in STRING_FIELDS)
@@ -344,8 +348,9 @@ def read_claims(path: Path) -> tuple[list[SourcedClaim], int]:
         if not _is_valid(row):
             continue
         for f in ("claim", "location", "item", "comparator_store"):
-            if isinstance(row.get(f), str):
-                row[f] = scrub(row[f])
+            value = row.get(f)
+            # Normalise null to "" so downstream `.strip()` has a string.
+            row[f] = scrub(value) if isinstance(value, str) else ""
         good.append(cast(SourcedClaim, row))
     return good, len(rows) - len(good) + unparseable
 
@@ -542,28 +547,47 @@ def branch_totals_from(
     return dict(totals)
 
 
-def headline_half_life(cells: Mapping[tuple[str, str], Cell]) -> float:
-    """The rate at which the headline number actually ages.
+def headline_half_life(
+    cells: Mapping[tuple[str, str], Cell], horizon_years: float = 5.0
+) -> float:
+    """The single half-life that ages like the headline does, at a horizon.
 
-    Store totals are an evidence-weighted mix of categories with half-lives
-    from 1.5 to 7 years, so the mix ages at neither the default nor any one
-    category's rate — it comes out near 4.7y on this corpus. Anything
-    compared against that number should be decayed at the same rate, or the
-    comparison quietly favours whichever side is aged more gently.
+    Store totals mix categories whose half-lives run from 1.5 to 7 years, and
+    a mixture of exponentials is not an exponential — so there is no single
+    half-life that matches it everywhere, and averaging the half-lives is
+    simply wrong. The arithmetic mean gives 4.72y here; at the five-year
+    horizon that actually matters the mixture retains 0.45 of its weight,
+    which is a half-life of 4.3y. Aging a second source at 4.72 would have
+    let it keep about 6% more weight than the corpus it is compared against
+    — the exact bias this function exists to remove.
+
+    So: compute what the mixture really retains at `horizon_years`, and
+    return the half-life that reproduces it. Exact at the horizon, close
+    either side of it, and honest that the horizon is a choice.
     """
     from .extract import NON_SHOPPING_CATEGORIES
 
-    num = den = 0.0
+    total = retained = 0.0
     for (_store, category), cell in cells.items():
         if category in NON_SHOPPING_CATEGORIES:
             continue
-        num += cell.weight * half_life_for(category)
-        den += cell.weight
-    return num / den if den else DEFAULT_HALF_LIFE_YEARS
+        total += cell.weight
+        retained += cell.weight * 0.5 ** (horizon_years / half_life_for(category))
+    if total <= 0 or horizon_years <= 0:
+        return DEFAULT_HALF_LIFE_YEARS
+    fraction = retained / total
+    # fraction is in (0,1) for any positive horizon, but guard the ends so a
+    # degenerate mixture cannot produce a log of zero.
+    if not 0.0 < fraction < 1.0:
+        return DEFAULT_HALF_LIFE_YEARS
+    return float(-horizon_years * math.log(2.0) / math.log(fraction))
 
 
 def _cell_view(cell: Cell, max_examples: int) -> dict[str, Any]:
-    level = cell.price_level()
+    # Suppress the number wherever the label is suppressed. Publishing a
+    # price_level of -0.13 beside a blank price_signal invited a reader to
+    # use the figure the label had just declined to stand behind.
+    level = cell.price_level() if cell.price_label() is not None else None
     return {
         "n_claims": cell.n,
         "weighted_evidence": round(cell.weight, 2),
@@ -601,6 +625,19 @@ def aggregate(
     chain = chain_rollup(cells)
     totals = totals_from(chain)
 
+    # One display name per branch, pooled across all of that branch's cells.
+    # Choosing it per-cell gave `branches` and `branch_totals` different
+    # spellings for the same branch in 18 of 21 stores, so anything joining
+    # the two by name — the merge does — silently missed those branches.
+    pooled_labels: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for (store, location, _cat), cell in cells.items():
+        if location:
+            pooled_labels[(store, location)].update(cell.labels)
+    branch_labels = {
+        key: (counts.most_common(1)[0][0] if counts else key[1])
+        for key, counts in pooled_labels.items()
+    }
+
     stores: dict[str, dict[str, Any]] = {}
     for (store, category), cell in chain.items():
         if cell.weight < min_weight:
@@ -611,7 +648,7 @@ def aggregate(
     for (store, location, category), cell in cells.items():
         if not location or cell.weight < min_weight:
             continue
-        name = cell.label(location)
+        name = branch_labels.get((store, location), location)
         branches.setdefault(store, {}).setdefault(name, {})[category] = _cell_view(
             cell, max_examples
         )
@@ -620,12 +657,8 @@ def aggregate(
     # a branch can be compared against anything else measured at that branch.
     # Display names come from the cells, so "somerville" reads "Somerville".
     branch_view: dict[str, dict[str, Any]] = {}
-    labels: dict[tuple[str, str], str] = {}
-    for (store, location, _cat), cell in cells.items():
-        if location:
-            labels.setdefault((store, location), cell.label(location))
     for (store, location), t in branch_totals_from(cells).items():
-        branch_view.setdefault(store, {})[labels[(store, location)]] = {
+        branch_view.setdefault(store, {})[branch_labels[(store, location)]] = {
             "n_claims": t.n,
             "weighted_evidence": round(t.weight, 2),
             "sentiment": round(t.sentiment(), 3),

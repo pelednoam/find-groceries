@@ -46,10 +46,26 @@ def corpus_provenance(claims_path: Path) -> dict[str, object]:
     return provenance
 
 
+def verdicts_path_for(claims: Path) -> Path:
+    """Where a claims file's verdicts belong.
+
+    The canonical corpus keeps the canonical name; anything else gets its
+    own, named after it. Defaulting to the canonical file meant
+    `--claims reviews_claims.jsonl` would have replaced the Reddit verdicts
+    with review-derived ones and reported success.
+    """
+    if claims.resolve() == CLAIMS.resolve():
+        return VERDICTS
+    stem = claims.stem.replace("_claims", "").replace("_placed", "")
+    return claims.parent / f"{stem}_verdicts.json"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--claims", type=Path, default=CLAIMS)
-    parser.add_argument("--out", type=Path, default=VERDICTS)
+    # No default: derived from --claims below, so pointing this at a
+    # secondary corpus cannot silently overwrite the canonical verdicts.
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--store", default=None)
     parser.add_argument("--min-weight", type=float, default=DEFAULT_MIN_WEIGHT)
     parser.add_argument("--no-provenance", action="store_true",
@@ -59,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.out is None:
+        args.out = verdicts_path_for(args.claims)
 
     if not args.claims.exists():
         print(f"no claims file at {args.claims}")
