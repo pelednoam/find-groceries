@@ -52,6 +52,13 @@ const dom = new JSDOM(fs.readFileSync(DOCS + "/index.html", "utf8"), {
   runScripts: "outside-only", virtualConsole: vc, url: "http://localhost:8177/",
 });
 const { window } = dom;
+// jsdom does not fetch external stylesheets, and the rules that decide what
+// is on screen live in styles.css — inline it so `display` is assertable.
+// (The @import of the font file is dropped; it fetches nothing here.)
+const styleTag = dom.window.document.createElement("style");
+styleTag.textContent = fs.readFileSync(DOCS + "/styles.css", "utf8").replace(/@import[^;]+;/g, "");
+dom.window.document.head.append(styleTag);
+const shown = (sel) => window.getComputedStyle($(sel)).display !== "none";
 const L = leafletStub(window);
 const payload = fs.readFileSync(DOCS + "/verdicts.json", "utf8");
 const payloadObj = JSON.parse(payload);
@@ -82,6 +89,11 @@ setTimeout(() => {
   ok(figures.every((t) => /\d/.test(t)), "method figures are real numbers", figures.join(" / "));
   console.log("        " + figures.join("  ·  "));
   ok($('meta[http-equiv="Content-Security-Policy"]') !== null, "CSP declared");
+  // One author rule setting `display` is enough to override the attribute,
+  // so check the whole page rather than the element that caught us out.
+  const stuckOpen = $$("[hidden]").filter((n) => window.getComputedStyle(n).display !== "none");
+  ok(stuckOpen.length === 0, "nothing marked hidden is on screen",
+     stuckOpen.map((n) => n.id || n.tagName).join(", "));
   ok($$('.tabs button[aria-selected]').length === $$(".tabs button").length,
      "every tab carries selection state");
   ok($$('.tabs button[tabindex="0"]').length === 1, "roving tabindex on the tablist");
@@ -269,8 +281,14 @@ function receiptRun() {
   const realFetch = window.fetch;
   window.fetch = (...a) => { fetched++; return realFetch(...a); };
 
+  // `hidden` is only a UA-stylesheet `display: none`, so any author rule
+  // setting `display` beats it. It once did, and the scanner was welded open.
+  ok(!shown("#scan-modal"), "scanner is off screen until asked for");
   click($("#scan-open"));
-  ok(!$("#scan-modal").hidden, "scanner opens");
+  ok(shown("#scan-modal"), "scanner opens on the button");
+  click($("#scan-close"));
+  ok(!shown("#scan-modal"), "and closes again");
+  click($("#scan-open"));
 
   $("#scan-text").value = RECEIPT;
   click($("#scan-run"));
@@ -293,7 +311,7 @@ function receiptRun() {
     $("#scan-hint").textContent);
 
   click($("#scan-save"));
-  ok($("#scan-modal").hidden, "scanner closes after saving");
+  ok(!shown("#scan-modal"), "scanner closes after saving");
 
   const stored = window.localStorage.getItem("basket.receipts.v1");
   ok(stored !== null, "the receipt is remembered");
@@ -315,7 +333,7 @@ function receiptRun() {
   ok($$("#list-result .trow").length > 0, "stores re-ranked on the learned basket");
 
   click($("#history-clear"));
-  ok($("#learned-panel").hidden, "clearing hides the habits");
+  ok(!shown("#learned-panel"), "clearing hides the habits");
   ok(window.localStorage.getItem("basket.receipts.v1") === null, "clearing forgets the receipt");
 }
 
